@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/stats"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/stats"
 	metrics "github.com/rcrowley/go-metrics"
 )
 

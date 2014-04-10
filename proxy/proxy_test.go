@@ -16,15 +16,15 @@ import (
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
 	. "launchpad.net/gocheck"
 
-	"github.com/cloudfoundry/gorouter/access_log"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/server"
+	"github.com/nimbus-cloud/gorouter/access_log"
+	router_http "github.com/nimbus-cloud/gorouter/common/http"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/server"
 
-	"github.com/cloudfoundry/gorouter/stats"
-	"github.com/cloudfoundry/gorouter/test_util"
+	"github.com/nimbus-cloud/gorouter/stats"
+	"github.com/nimbus-cloud/gorouter/test_util"
 )
 
 type connHandler func(*httpConn)

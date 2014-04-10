@@ -3,9 +3,9 @@ package main
 import (
 	"flag"
 
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/log"
-	"github.com/cloudfoundry/gorouter/router"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/log"
+	"github.com/nimbus-cloud/gorouter/router"
 )
 
 var configFile string

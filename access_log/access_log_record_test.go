@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"time"
 
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/route"
+	router_http "github.com/nimbus-cloud/gorouter/common/http"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 type AccessLogRecordSuite struct{}

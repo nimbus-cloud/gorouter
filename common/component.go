@@ -3,7 +3,7 @@ package common
 import (
 	"encoding/json"
 	"fmt"
-	. "github.com/cloudfoundry/gorouter/common/http"
+	. "github.com/nimbus-cloud/gorouter/common/http"
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
 	"net/http"

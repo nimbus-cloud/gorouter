@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/proxy"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 func NewStickyApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSClient, tags map[string]string) *TestApp {

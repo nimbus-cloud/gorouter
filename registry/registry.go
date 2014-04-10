@@ -8,9 +8,9 @@ import (
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
 
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/log"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/log"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 type CFRegistry struct {

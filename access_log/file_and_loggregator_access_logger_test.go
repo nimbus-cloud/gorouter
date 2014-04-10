@@ -1,8 +1,8 @@
 package access_log
 
 import (
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/test_util"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/test_util"
 	"github.com/cloudfoundry/loggregatorlib/logmessage"
 
 	. "launchpad.net/gocheck"

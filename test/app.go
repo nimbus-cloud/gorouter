@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/common"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/common"
+	"github.com/nimbus-cloud/gorouter/route"
 	"github.com/cloudfoundry/yagnats"
 )
 

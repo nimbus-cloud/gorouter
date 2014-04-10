@@ -9,17 +9,17 @@ import (
 	"runtime"
 	"time"
 
-	vcap "github.com/cloudfoundry/gorouter/common"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/log"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/server"
-	"github.com/cloudfoundry/gorouter/util"
-	"github.com/cloudfoundry/gorouter/varz"
+	vcap "github.com/nimbus-cloud/gorouter/common"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/log"
+	"github.com/nimbus-cloud/gorouter/proxy"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/server"
+	"github.com/nimbus-cloud/gorouter/util"
+	"github.com/nimbus-cloud/gorouter/varz"
 	"github.com/cloudfoundry/yagnats"
 
-	"github.com/cloudfoundry/gorouter/access_log"
+	"github.com/nimbus-cloud/gorouter/access_log"
 )
 
 type Router struct {

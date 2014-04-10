@@ -1,7 +1,7 @@
 package config
 
 import (
-	vcap "github.com/cloudfoundry/gorouter/common"
+	vcap "github.com/nimbus-cloud/gorouter/common"
 	"io/ioutil"
 	"launchpad.net/goyaml"
 	"time"

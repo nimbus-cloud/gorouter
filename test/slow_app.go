@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 func NewSlowApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSClient, delay time.Duration) *TestApp {

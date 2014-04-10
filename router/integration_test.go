@@ -7,10 +7,10 @@ import (
 	"github.com/cloudfoundry/yagnats"
 	. "launchpad.net/gocheck"
 
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/log"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/test"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/log"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/test"
 )
 
 type IntegrationSuite struct {

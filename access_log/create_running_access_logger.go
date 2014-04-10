@@ -3,7 +3,7 @@ package access_log
 import (
 	"os"
 
-	"github.com/cloudfoundry/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/config"
 )
 
 func CreateRunningAccessLogger(config *config.Config) (accessLogger AccessLogger) {

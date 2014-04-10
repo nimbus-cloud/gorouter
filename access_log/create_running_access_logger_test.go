@@ -1,7 +1,7 @@
 package access_log
 
 import (
-	"github.com/cloudfoundry/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/config"
 	. "launchpad.net/gocheck"
 )
 

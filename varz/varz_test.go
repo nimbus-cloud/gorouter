@@ -9,9 +9,9 @@ import (
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
 	. "launchpad.net/gocheck"
 
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 type VarzSuite struct {

@@ -21,7 +21,7 @@ Follow these steps to make a contribution to any of our open source repositories
 1. Fork the repository
 1. Create a feature branch (`git checkout -b better_gorouter`)
 1. Make changes on your branch
-1. [Run tests](https://github.com/cloudfoundry/gorouter#running-tests)
+1. [Run tests](https://github.com/nimbus-cloud/gorouter#running-tests)
 1. Push to your fork (`git push origin better_gorouter`) and submit a pull request
 
 We favor pull requests with very small, single commits with a single purpose.

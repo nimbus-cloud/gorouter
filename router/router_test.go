@@ -16,12 +16,12 @@ import (
 	"github.com/cloudfoundry/yagnats"
 	. "launchpad.net/gocheck"
 
-	"github.com/cloudfoundry/gorouter/common"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/test"
+	"github.com/nimbus-cloud/gorouter/common"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/proxy"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/test"
 )
 
 type RouterSuite struct {

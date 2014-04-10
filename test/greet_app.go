@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 func NewGreetApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSClient, tags map[string]string) *TestApp {

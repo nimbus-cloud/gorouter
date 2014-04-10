@@ -5,12 +5,12 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/cloudfoundry/gorouter/access_log"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/varz"
+	"github.com/nimbus-cloud/gorouter/access_log"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/proxy"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/varz"
 )
 
 const (

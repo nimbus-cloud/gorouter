@@ -1,5 +1,5 @@
 {
-	"ImportPath": "github.com/cloudfoundry/gorouter",
+	"ImportPath": "github.com/nimbus-cloud/gorouter",
 	"GoVersion": "go1.2.1",
 	"Packages": [
 		"./..."

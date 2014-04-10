@@ -15,7 +15,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/cloudfoundry/gorouter/server"
+	"github.com/nimbus-cloud/gorouter/server"
 )
 
 // A Server is an HTTP server listening on a system-chosen port on the

@@ -37,9 +37,9 @@ To install exactly the dependecies vendored with gorouter, use [godep](https://g
 
 ```bash
 go get -v github.com/tools/godep
-go get -v github.com/cloudfoundry/gorouter
+go get -v github.com/nimbus-cloud/gorouter
 
-cd $GOPATH/src/github.com/cloudfoundry/gorouter
+cd $GOPATH/src/github.com/nimbus-cloud/gorouter
 
 godep restore ./...
 ```
@@ -191,4 +191,4 @@ to prune routes for stale droplets.
 
 ## Contributing
 
-Please read the [contributors' guide](https://github.com/cloudfoundry/gorouter/blob/master/CONTRIBUTING.md)
+Please read the [contributors' guide](https://github.com/nimbus-cloud/gorouter/blob/master/CONTRIBUTING.md)

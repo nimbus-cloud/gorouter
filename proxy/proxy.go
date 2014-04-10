@@ -8,9 +8,9 @@ import (
 
 	steno "github.com/cloudfoundry/gosteno"
 
-	"github.com/cloudfoundry/gorouter/access_log"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/access_log"
+	router_http "github.com/nimbus-cloud/gorouter/common/http"
+	"github.com/nimbus-cloud/gorouter/route"
 )
 
 const (

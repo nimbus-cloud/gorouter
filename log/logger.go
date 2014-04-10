@@ -1,8 +1,8 @@
 package log
 
 import (
-	"github.com/cloudfoundry/gorouter/common"
-	"github.com/cloudfoundry/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/common"
+	"github.com/nimbus-cloud/gorouter/config"
 	steno "github.com/cloudfoundry/gosteno"
 	"os"
 )

@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/server"
-	"github.com/cloudfoundry/gorouter/server/httptest"
+	"github.com/nimbus-cloud/gorouter/server"
+	"github.com/nimbus-cloud/gorouter/server/httptest"
 )
 
 type dummyAddr string

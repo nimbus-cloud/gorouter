@@ -12,7 +12,7 @@ import (
 	steno "github.com/cloudfoundry/gosteno"
 	. "launchpad.net/gocheck"
 
-	"github.com/cloudfoundry/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/config"
 )
 
 func Test(t *testing.T) {

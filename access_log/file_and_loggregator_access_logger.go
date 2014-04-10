@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/cloudfoundry/gorouter/log"
+	"github.com/nimbus-cloud/gorouter/log"
 
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/loggregatorlib/emitter"

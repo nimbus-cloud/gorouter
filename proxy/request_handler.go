@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/common"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/route"
+	"github.com/nimbus-cloud/gorouter/common"
+	router_http "github.com/nimbus-cloud/gorouter/common/http"
+	"github.com/nimbus-cloud/gorouter/route"
 	steno "github.com/cloudfoundry/gosteno"
 )
 

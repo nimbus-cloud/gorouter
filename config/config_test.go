@@ -102,6 +102,22 @@ loggregatorConfig:
 	c.Check(s.LoggregatorConfig.Url, Equals, "10.10.16.14:3456")
 }
 
+func (s *ConfigSuite) TestPreferredNetowrk(c *C) {
+	var b = []byte(`
+preferred_network: 10.1.1.0/24
+`)
+
+	c.Check(s.PreferredNetworkAsString, Equals, "")
+
+	s.Config.Initialize(b)
+
+	c.Check(s.PreferredNetworkAsString, Equals, "10.1.1.0/24")
+	
+	s.Config.Process()
+	
+	c.Check(s.PreferredNetwork, Not(Equals), nil)
+}
+
 func (s *ConfigSuite) TestConfig(c *C) {
 	var b = []byte(`
 port: 8082

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"time"
+	"net"
 
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
@@ -28,6 +29,8 @@ type CFRegistry struct {
 	messageBus yagnats.NATSClient
 
 	timeOfLastUpdate time.Time
+	
+	preferredNetwork *net.IPNet
 }
 
 type tableKey struct {
@@ -51,6 +54,8 @@ func NewCFRegistry(c *config.Config, mbus yagnats.NATSClient) *CFRegistry {
 
 	r.pruneStaleDropletsInterval = c.PruneStaleDropletsInterval
 	r.dropletStaleThreshold = c.DropletStaleThreshold
+
+	r.preferredNetwork = c.PreferredNetwork
 
 	r.messageBus = mbus
 
@@ -82,7 +87,7 @@ func (registry *CFRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 
 	pool, found := registry.byUri[uri]
 	if !found {
-		pool = route.NewPool()
+		pool = route.NewPool(registry.preferredNetwork)
 		registry.byUri[uri] = pool
 	}
 

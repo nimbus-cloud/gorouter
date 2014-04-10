@@ -3,6 +3,7 @@ package route
 import (
 	. "launchpad.net/gocheck"
 	"math"
+	"net"
 )
 
 type PSuite struct{}
@@ -12,7 +13,7 @@ func init() {
 }
 
 func (s *PSuite) TestPoolAddingAndRemoving(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpoint := &Endpoint{}
 
@@ -29,7 +30,7 @@ func (s *PSuite) TestPoolAddingAndRemoving(c *C) {
 }
 
 func (s *PSuite) TestPoolAddingDoesNotDuplicate(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpoint := &Endpoint{}
 
@@ -47,7 +48,7 @@ func (s *PSuite) TestPoolAddingDoesNotDuplicate(c *C) {
 }
 
 func (s *PSuite) TestPoolAddingEquivalentEndpointsDoesNotDuplicate(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpoint1 := &Endpoint{Host: "1.2.3.4", Port: 5678}
 	endpoint2 := &Endpoint{Host: "1.2.3.4", Port: 5678}
@@ -65,11 +66,11 @@ func (s *PSuite) TestPoolAddingEquivalentEndpointsDoesNotDuplicate(c *C) {
 }
 
 func (s *PSuite) TestPoolIsEmptyInitially(c *C) {
-	c.Assert(NewPool().IsEmpty(), Equals, true)
+	c.Assert(NewPool(nil).IsEmpty(), Equals, true)
 }
 
 func (s *PSuite) TestPoolIsEmptyAfterRemovingEverything(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpoint := &Endpoint{}
 
@@ -83,7 +84,7 @@ func (s *PSuite) TestPoolIsEmptyAfterRemovingEverything(c *C) {
 }
 
 func (s *PSuite) TestPoolFindByPrivateInstanceId(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpointFoo := &Endpoint{Host: "1.2.3.4", Port: 1234, PrivateInstanceId: "foo"}
 	endpointBar := &Endpoint{Host: "5.6.7.8", Port: 5678, PrivateInstanceId: "bar"}
@@ -104,7 +105,7 @@ func (s *PSuite) TestPoolFindByPrivateInstanceId(c *C) {
 }
 
 func (s *PSuite) TestPoolSamplingIsRandomish(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	endpoint1 := &Endpoint{Host: "1.2.3.4", Port: 5678}
 	endpoint2 := &Endpoint{Host: "5.6.7.8", Port: 1234}
@@ -131,7 +132,7 @@ func (s *PSuite) TestPoolSamplingIsRandomish(c *C) {
 }
 
 func (s *PSuite) TestPoolMarshalsAsJSON(c *C) {
-	pool := NewPool()
+	pool := NewPool(nil)
 
 	pool.Add(&Endpoint{Host: "1.2.3.4", Port: 5678})
 
@@ -139,4 +140,23 @@ func (s *PSuite) TestPoolMarshalsAsJSON(c *C) {
 	c.Assert(err, IsNil)
 
 	c.Assert(string(json), Equals, `["1.2.3.4:5678"]`)
+}
+
+func (s *PSuite) TestPreferredNetwork(c *C) {
+
+	_, testnet, _ := net.ParseCIDR("10.1.1.0/24")
+
+	pool := NewPool(testnet)
+
+	endpoint1 := &Endpoint{Host: "10.1.1.5", Port: 5678} 
+
+	pool.Add(endpoint1)
+	pool.Add(&Endpoint{Host: "10.1.2.5", Port: 5678})
+	pool.Add(&Endpoint{Host: "10.1.2.6", Port: 5678})
+	pool.Add(&Endpoint{Host: "10.1.2.7", Port: 5678})
+	
+	foundEndpoint, found := pool.Sample()
+	
+	c.Assert(found, Equals, true)
+	c.Assert(foundEndpoint, Equals, endpoint1)
 }

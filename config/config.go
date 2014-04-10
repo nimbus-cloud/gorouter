@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"launchpad.net/goyaml"
 	"time"
+	"net"
 )
 
 type StatusConfig struct {
@@ -64,6 +65,7 @@ type Config struct {
 	GoMaxProcs int    "go_max_procs,omitempty"
 	TraceKey   string "trace_key"
 	AccessLog  string "access_log"
+	PreferredNetworkAsString string "preferred_network"
 
 	PublishStartMessageIntervalInSeconds int "publish_start_message_interval"
 	PruneStaleDropletsIntervalInSeconds  int "prune_stale_droplets_interval"
@@ -78,6 +80,8 @@ type Config struct {
 	PublishActiveAppsInterval  time.Duration
 	StartResponseDelayInterval time.Duration
 	EndpointTimeout            time.Duration
+
+	PreferredNetwork           *net.IPNet
 
 	Ip string
 }
@@ -100,6 +104,7 @@ var defaultConfig = Config{
 	DropletStaleThresholdInSeconds:       120,
 	PublishActiveAppsIntervalInSeconds:   0,
 	StartResponseDelayIntervalInSeconds:  5,
+	PreferredNetworkAsString: "",
 }
 
 func DefaultConfig() *Config {
@@ -118,6 +123,15 @@ func (c *Config) Process() {
 	c.PublishActiveAppsInterval = time.Duration(c.PublishActiveAppsIntervalInSeconds) * time.Second
 	c.StartResponseDelayInterval = time.Duration(c.StartResponseDelayIntervalInSeconds) * time.Second
 	c.EndpointTimeout = time.Duration(c.EndpointTimeoutInSeconds) * time.Second
+
+	if (c.PreferredNetworkAsString != "") {
+		_, c.PreferredNetwork, err = net.ParseCIDR(c.PreferredNetworkAsString)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		c.PreferredNetwork = nil
+	}
 
 	c.Ip, err = vcap.LocalIP()
 	if err != nil {

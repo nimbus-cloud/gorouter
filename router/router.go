@@ -6,18 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"runtime"
 	"time"
 
+	"github.com/cloudfoundry/yagnats"
 	vcap "github.com/nimbus-cloud/gorouter/common"
 	"github.com/nimbus-cloud/gorouter/config"
 	"github.com/nimbus-cloud/gorouter/log"
 	"github.com/nimbus-cloud/gorouter/proxy"
 	"github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/server"
 	"github.com/nimbus-cloud/gorouter/util"
 	"github.com/nimbus-cloud/gorouter/varz"
-	"github.com/cloudfoundry/yagnats"
 
 	"github.com/nimbus-cloud/gorouter/access_log"
 )
@@ -89,8 +89,10 @@ func NewRouter(c *config.Config) *Router {
 	return router
 }
 
-func (r *Router) Run() {
+func (r *Router) Run() <-chan error {
 	var err error
+
+	util.WritePidFile(r.config.Pidfile)
 
 	natsMembers := []yagnats.ConnectionProvider{}
 
@@ -106,7 +108,6 @@ func (r *Router) Run() {
 
 	for {
 		err = r.mbusClient.Connect(natsInfo)
-
 		if err == nil {
 			log.Infof("Connected to NATS")
 			break
@@ -146,18 +147,17 @@ func (r *Router) Run() {
 		log.Fatalf("net.Listen: %s", err)
 	}
 
-	util.WritePidFile(r.config.Pidfile)
-
 	log.Infof("Listening on %s", listen.Addr())
 
-	server := server.Server{Handler: r.proxy}
+	server := http.Server{Handler: r.proxy}
 
+	errChan := make(chan error, 1)
 	go func() {
 		err := server.Serve(listen)
-		if err != nil {
-			log.Fatalf("proxy.Serve: %s", err)
-		}
+		errChan <- err
 	}()
+
+	return errChan
 }
 
 func (r *Router) RegisterComponent() {
@@ -254,8 +254,13 @@ func (r *Router) greetMessage() ([]byte, error) {
 		return nil, err
 	}
 
+	uuid, err := vcap.GenerateUUID()
+	if err != nil {
+		return nil, err
+	}
+
 	d := vcap.RouterStart{
-		vcap.GenerateUUID(),
+		uuid,
 		[]string{host},
 		r.config.StartResponseDelayIntervalInSeconds,
 	}

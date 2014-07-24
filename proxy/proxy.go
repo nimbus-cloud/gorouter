@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"regexp"
 
 	steno "github.com/cloudfoundry/gosteno"
 
@@ -300,7 +301,10 @@ func isTcpUpgrade(request *http.Request) bool {
 
 func upgradeHeader(request *http.Request) string {
 	// upgrade should be case insensitive per RFC6455 4.2.1
-	if strings.ToLower(request.Header.Get("Connection")) == "upgrade" {
+	
+	r, _ := regexp.Compile("upgrade")
+
+	if r.MatchString(strings.ToLower(request.Header.Get("Connection"))) {
 		return request.Header.Get("Upgrade")
 	} else {
 		return ""

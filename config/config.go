@@ -3,6 +3,8 @@ package config
 import (
 	"github.com/cloudfoundry-incubator/candiedyaml"
 	vcap "github.com/nimbus-cloud/gorouter/common"
+	steno "github.com/cloudfoundry/gosteno"
+
 	"io/ioutil"
 	"net"
 	"time"
@@ -61,7 +63,6 @@ type Config struct {
 
 	Port                     uint16 `yaml:"port"`
 	Index                    uint   `yaml:"index"`
-	Pidfile                  string `yaml:"pidfile"`
 	GoMaxProcs               int    `yaml:"go_max_procs,omitempty"`
 	TraceKey                 string `yaml:"trace_key"`
 	AccessLog                string `yaml:"access_log"`
@@ -73,17 +74,19 @@ type Config struct {
 	PublishActiveAppsIntervalInSeconds   int `yaml:"publish_active_apps_interval"`
 	StartResponseDelayIntervalInSeconds  int `yaml:"start_response_delay_interval"`
 	EndpointTimeoutInSeconds             int `yaml:"endpoint_timeout"`
+	DrainTimeoutInSeconds                int `yaml:"drain_timeout,omitempty"`
 
 	// These fields are populated by the `Process` function.
-	PruneStaleDropletsInterval time.Duration
-	DropletStaleThreshold      time.Duration
-	PublishActiveAppsInterval  time.Duration
-	StartResponseDelayInterval time.Duration
-	EndpointTimeout            time.Duration
+	PruneStaleDropletsInterval time.Duration `yaml:"-"`
+	DropletStaleThreshold      time.Duration `yaml:"-"`
+	PublishActiveAppsInterval  time.Duration `yaml:"-"`
+	StartResponseDelayInterval time.Duration `yaml:"-"`
+	EndpointTimeout            time.Duration `yaml:"-"`
+	DrainTimeout               time.Duration `yaml:"-"`
 
 	PreferredNetwork *net.IPNet
 
-	Ip string
+	Ip string `yaml:"-"`
 }
 
 var defaultConfig = Config{
@@ -94,7 +97,6 @@ var defaultConfig = Config{
 
 	Port:       8081,
 	Index:      0,
-	Pidfile:    "",
 	GoMaxProcs: 8,
 
 	EndpointTimeoutInSeconds: 60,
@@ -106,6 +108,8 @@ var defaultConfig = Config{
 	StartResponseDelayIntervalInSeconds:  5,
 	PreferredNetworkAsString:             "",
 }
+
+var log = steno.NewLogger("config.logger")
 
 func DefaultConfig() *Config {
 	c := defaultConfig
@@ -132,6 +136,17 @@ func (c *Config) Process() {
 	} else {
 		c.PreferredNetwork = nil
 	}
+
+	if c.StartResponseDelayInterval > c.DropletStaleThreshold {
+		c.DropletStaleThreshold = c.StartResponseDelayInterval
+		log.Warnf("DropletStaleThreshold (%s) cannot be less than StartResponseDelayInterval (%s); setting both equal to StartResponseDelayInterval and continuing", c.DropletStaleThreshold, c.StartResponseDelayInterval)
+	}
+
+	drain := c.DrainTimeoutInSeconds
+	if drain == 0 {
+		drain = c.EndpointTimeoutInSeconds
+	}
+	c.DrainTimeout = time.Duration(drain) * time.Second
 
 	c.Ip, err = vcap.LocalIP()
 	if err != nil {

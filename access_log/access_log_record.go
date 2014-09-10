@@ -12,7 +12,7 @@ import (
 
 type AccessLogRecord struct {
 	Request       *http.Request
-	Response      *http.Response
+	StatusCode    int
 	RouteEndpoint *route.Endpoint
 	StartedAt     time.Time
 	FirstByteAt   time.Time
@@ -42,16 +42,17 @@ func (r *AccessLogRecord) makeRecord() *bytes.Buffer {
 	fmt.Fprintf(b, `[%s] `, r.FormatStartedAt())
 	fmt.Fprintf(b, `"%s %s %s" `, r.Request.Method, r.Request.URL.RequestURI(), r.Request.Proto)
 
-	if r.Response == nil {
+	if r.StatusCode == 0 {
 		fmt.Fprintf(b, "MissingResponseStatusCode ")
 	} else {
-		fmt.Fprintf(b, `%d `, r.Response.StatusCode)
+		fmt.Fprintf(b, `%d `, r.StatusCode)
 	}
 
 	fmt.Fprintf(b, `%d `, r.BodyBytesSent)
 	fmt.Fprintf(b, `"%s" `, r.FormatRequestHeader("Referer"))
 	fmt.Fprintf(b, `"%s" `, r.FormatRequestHeader("User-Agent"))
 	fmt.Fprintf(b, `%s `, r.Request.RemoteAddr)
+	fmt.Fprintf(b, `x_forwarded_for:"%s" `, r.FormatRequestHeader("X-Forwarded-For"))
 	fmt.Fprintf(b, `vcap_request_id:%s `, r.FormatRequestHeader("X-Vcap-Request-Id"))
 
 	if r.ResponseTime() < 0 {
@@ -76,11 +77,7 @@ func (r *AccessLogRecord) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (r *AccessLogRecord) ApplicationId() string {
-	if r.RouteEndpoint == nil {
-		return ""
-	}
-
-	if r.RouteEndpoint.ApplicationId == "" {
+	if r.RouteEndpoint == nil || r.RouteEndpoint.ApplicationId == "" {
 		return ""
 	}
 

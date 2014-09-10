@@ -11,18 +11,21 @@ type NATSClient interface {
 	Disconnect()
 	Publish(subject string, payload []byte) error
 	PublishWithReplyTo(subject, reply string, payload []byte) error
-	Subscribe(subject string, callback Callback) (int, error)
-	SubscribeWithQueue(subject, queue string, callback Callback) (int, error)
-	Unsubscribe(subscription int) error
+	Subscribe(subject string, callback Callback) (int64, error)
+	SubscribeWithQueue(subject, queue string, callback Callback) (int64, error)
+	Unsubscribe(subscription int64) error
 	UnsubscribeAll(subject string)
 }
 
 type Callback func(*Message)
 
 type Client struct {
-	connection    chan *Connection
-	subscriptions map[int]*Subscription
-	disconnecting bool
+	connection          chan *Connection
+	subscriptions       map[int64]*Subscription
+	subscriptionCounter int64
+	connected           bool
+	disconnecting       bool
+	lock                *sync.Mutex
 
 	ConnectedCallback func()
 
@@ -40,16 +43,18 @@ type Subscription struct {
 	Subject  string
 	Queue    string
 	Callback Callback
-	ID       int
+	ID       int64
 }
 
 func NewClient() *Client {
 	return &Client{
 		connection:    make(chan *Connection),
-		subscriptions: make(map[int]*Subscription),
+		subscriptions: make(map[int64]*Subscription),
+		lock:          &sync.Mutex{},
 
 		logger:      &DefaultLogger{},
 		loggerMutex: &sync.RWMutex{},
+		connected:   false,
 	}
 }
 
@@ -78,13 +83,14 @@ func (c *Client) Connect(cp ConnectionProvider) error {
 }
 
 func (c *Client) Disconnect() {
-	if c.disconnecting {
+	if !c.connected || c.disconnecting {
 		return
 	}
 
 	conn := <-c.connection
 	c.disconnecting = true
 	conn.Disconnect()
+	c.connected = false
 }
 
 func (c *Client) Publish(subject string, payload []byte) error {
@@ -114,29 +120,38 @@ func (c *Client) PublishWithReplyTo(subject, reply string, payload []byte) error
 	return conn.ErrOrOK()
 }
 
-func (c *Client) Subscribe(subject string, callback Callback) (int, error) {
+func (c *Client) Subscribe(subject string, callback Callback) (int64, error) {
 	return c.subscribe(subject, "", callback)
 }
 
-func (c *Client) SubscribeWithQueue(subject, queue string, callback Callback) (int, error) {
+func (c *Client) SubscribeWithQueue(subject, queue string, callback Callback) (int64, error) {
 	return c.subscribe(subject, queue, callback)
 }
 
-func (c *Client) Unsubscribe(sid int) error {
+func (c *Client) Unsubscribe(sid int64) error {
 	conn := <-c.connection
 
 	conn.Send(&UnsubPacket{ID: sid})
 
+	c.lock.Lock()
 	delete(c.subscriptions, sid)
+	c.lock.Unlock()
 
 	return conn.ErrOrOK()
 }
 
 func (c *Client) UnsubscribeAll(subject string) {
+	idsToUnsubscribe := []int64{}
+	c.lock.Lock()
 	for id, sub := range c.subscriptions {
 		if sub.Subject == subject {
-			c.Unsubscribe(id)
+			idsToUnsubscribe = append(idsToUnsubscribe, id)
 		}
+	}
+	c.lock.Unlock()
+
+	for _, id := range idsToUnsubscribe {
+		c.Unsubscribe(id)
 	}
 }
 
@@ -152,10 +167,12 @@ func (c *Client) Logger() Logger {
 	return c.logger
 }
 
-func (c *Client) subscribe(subject, queue string, callback Callback) (int, error) {
+func (c *Client) subscribe(subject, queue string, callback Callback) (int64, error) {
 	conn := <-c.connection
 
-	id := len(c.subscriptions) + 1
+	c.lock.Lock()
+	c.subscriptionCounter++
+	id := c.subscriptionCounter
 
 	c.subscriptions[id] = &Subscription{
 		Subject:  subject,
@@ -163,6 +180,7 @@ func (c *Client) subscribe(subject, queue string, callback Callback) (int, error
 		Callback: callback,
 		ID:       id,
 	}
+	c.lock.Unlock()
 
 	conn.Send(
 		&SubPacket{
@@ -180,21 +198,8 @@ func (c *Client) subscribe(subject, queue string, callback Callback) (int, error
 	return id, nil
 }
 
-func (c *Client) connect(cp ConnectionProvider) (conn *Connection, err error) {
-	conn, err = cp.ProvideConnection()
-	if err != nil {
-		return
-	}
-
-	conn.OnMessage(c.dispatchMessage)
-
-	conn.SetLogger(c.Logger())
-
-	return
-}
-
 func (c *Client) serveConnections(conn *Connection, cp ConnectionProvider) {
-	var err error
+	c.connected = true
 
 	// serve connection until disconnected
 	for stop := false; !stop; {
@@ -214,11 +219,28 @@ func (c *Client) serveConnections(conn *Connection, cp ConnectionProvider) {
 		return
 	}
 
+	c.reconnect(cp)
+}
+
+func (c *Client) connect(cp ConnectionProvider) (conn *Connection, err error) {
+	conn, err = cp.ProvideConnection()
+	if err != nil {
+		return
+	}
+
+	conn.OnMessage(c.dispatchMessage)
+
+	conn.SetLogger(c.Logger())
+
+	return
+}
+
+func (c *Client) reconnect(cp ConnectionProvider) {
 	// acquire new connection
 	for {
 		c.Logger().Debug("client.reconnect.starting")
 
-		conn, err = c.connect(cp)
+		conn, err := c.connect(cp)
 		if err == nil {
 			go c.serveConnections(conn, cp)
 			c.Logger().Debug("client.connection.resubscribing")
@@ -238,14 +260,21 @@ func (c *Client) serveConnections(conn *Connection, cp ConnectionProvider) {
 }
 
 func (c *Client) resubscribe(conn *Connection) error {
+	packetsToSend := []*SubPacket{}
+
+	c.lock.Lock()
 	for id, sub := range c.subscriptions {
-		conn.Send(
-			&SubPacket{
-				Subject: sub.Subject,
-				Queue:   sub.Queue,
-				ID:      id,
-			},
+		packetsToSend = append(packetsToSend, &SubPacket{
+			Subject: sub.Subject,
+			Queue:   sub.Queue,
+			ID:      id,
+		},
 		)
+	}
+	c.lock.Unlock()
+
+	for _, packet := range packetsToSend {
+		conn.Send(packet)
 
 		err := conn.ErrOrOK()
 		if err != nil {
@@ -257,10 +286,13 @@ func (c *Client) resubscribe(conn *Connection) error {
 }
 
 func (c *Client) dispatchMessage(msg *MsgPacket) {
+	c.lock.Lock()
 	sub := c.subscriptions[msg.SubID]
 	if sub == nil {
+		c.lock.Unlock()
 		return
 	}
+	c.lock.Unlock()
 
 	go sub.Callback(
 		&Message{

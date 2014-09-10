@@ -1,19 +1,22 @@
 package test
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	. "launchpad.net/gocheck"
-	"net/http"
-	"time"
-
 	"github.com/nimbus-cloud/gorouter/common"
 	"github.com/nimbus-cloud/gorouter/route"
 	"github.com/cloudfoundry/yagnats"
+	. "github.com/onsi/gomega"
+
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
 )
 
 type TestApp struct {
+	mutex sync.Mutex
+
 	port       uint16      // app listening port
 	rPort      uint16      // router listening port
 	urls       []route.Uri // host registered host name
@@ -61,9 +64,9 @@ func (a *TestApp) Listen() {
 }
 
 func (a *TestApp) RegisterRepeatedly(duration time.Duration) {
-	a.stopped = false
+	a.start()
 	for {
-		if a.stopped {
+		if a.isStopped() {
 			break
 		}
 		a.Register()
@@ -100,12 +103,13 @@ func (a *TestApp) Unregister() {
 
 	b, _ := json.Marshal(rm)
 	a.mbusClient.Publish("router.unregister", b)
-	a.stopped = true
+
+	a.stop()
 }
 
-func (a *TestApp) VerifyAppStatus(status int, c *C) {
+func (a *TestApp) VerifyAppStatus(status int) {
 	check := a.CheckAppStatus(status)
-	c.Assert(check, IsNil)
+	Ω(check).ShouldNot(HaveOccurred())
 }
 
 func (a *TestApp) CheckAppStatus(status int) error {
@@ -122,6 +126,24 @@ func (a *TestApp) CheckAppStatus(status int) error {
 	}
 
 	return nil
+}
+
+func (a *TestApp) start() {
+	a.mutex.Lock()
+	a.stopped = false
+	a.mutex.Unlock()
+}
+
+func (a *TestApp) stop() {
+	a.mutex.Lock()
+	a.stopped = true
+	a.mutex.Unlock()
+}
+
+func (a *TestApp) isStopped() bool {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	return a.stopped
 }
 
 type registerMessage struct {

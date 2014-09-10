@@ -1,121 +1,89 @@
 package router
 
 import (
+	"github.com/cloudfoundry-incubator/dropsonde/autowire"
+	vcap "github.com/nimbus-cloud/gorouter/common"
+	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/nimbus-cloud/gorouter/proxy"
+	"github.com/nimbus-cloud/gorouter/registry"
+	"github.com/nimbus-cloud/gorouter/varz"
+	steno "github.com/cloudfoundry/gosteno"
+	"github.com/cloudfoundry/yagnats"
+
 	"bytes"
 	"compress/zlib"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"runtime"
 	"time"
-
-	"github.com/cloudfoundry/yagnats"
-	vcap "github.com/nimbus-cloud/gorouter/common"
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/log"
-	"github.com/nimbus-cloud/gorouter/proxy"
-	"github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/util"
-	"github.com/nimbus-cloud/gorouter/varz"
-
-	"github.com/nimbus-cloud/gorouter/access_log"
 )
+
+var DrainTimeout = errors.New("router: Drain timeout")
 
 type Router struct {
 	config     *config.Config
 	proxy      proxy.Proxy
 	mbusClient *yagnats.Client
-	registry   *registry.CFRegistry
+	registry   *registry.RouteRegistry
 	varz       varz.Varz
 	component  *vcap.VcapComponent
+
+	listener net.Listener
+
+	logger *steno.Logger
 }
 
-func NewRouter(c *config.Config) *Router {
-	router := &Router{
-		config: c,
-	}
-
-	// setup number of procs
-	if router.config.GoMaxProcs != 0 {
-		runtime.GOMAXPROCS(router.config.GoMaxProcs)
-	}
-
-	router.mbusClient = yagnats.NewClient()
-
-	router.registry = registry.NewCFRegistry(router.config, router.mbusClient)
-	router.registry.StartPruningCycle()
-
-	router.varz = varz.NewVarz(router.registry)
-	args := proxy.ProxyArgs{
-		EndpointTimeout: router.config.EndpointTimeout,
-		Ip:              router.config.Ip,
-		TraceKey:        router.config.TraceKey,
-		Registry:        router.registry,
-		Reporter:        router.varz,
-		Logger:          access_log.CreateRunningAccessLogger(router.config),
-	}
-	router.proxy = proxy.NewProxy(args)
+func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient *yagnats.Client, r *registry.RouteRegistry, v varz.Varz,
+	logCounter *vcap.LogCounter) (*Router, error) {
 
 	var host string
-	if router.config.Status.Port != 0 {
-		host = fmt.Sprintf("%s:%d", router.config.Ip, router.config.Status.Port)
+	if cfg.Status.Port != 0 {
+		host = fmt.Sprintf("%s:%d", cfg.Ip, cfg.Status.Port)
 	}
 
 	varz := &vcap.Varz{
-		UniqueVarz: router.varz,
-	}
-	varz.LogCounts = log.Counter
-
-	healthz := &vcap.Healthz{
-		LockableObject: router.registry,
-	}
-
-	router.component = &vcap.VcapComponent{
-		Type:        "Router",
-		Index:       router.config.Index,
-		Host:        host,
-		Credentials: []string{router.config.Status.User, router.config.Status.Pass},
-		Config:      router.config,
-		Varz:        varz,
-		Healthz:     healthz,
-		InfoRoutes: map[string]json.Marshaler{
-			"/routes": router.registry,
+		UniqueVarz: v,
+		GenericVarz: vcap.GenericVarz{
+			LogCounts: logCounter,
 		},
 	}
 
-	vcap.StartComponent(router.component)
+	healthz := &vcap.Healthz{}
 
-	return router
+	component := &vcap.VcapComponent{
+		Type:        "Router",
+		Index:       cfg.Index,
+		Host:        host,
+		Credentials: []string{cfg.Status.User, cfg.Status.Pass},
+		Config:      cfg,
+		Varz:        varz,
+		Healthz:     healthz,
+		InfoRoutes: map[string]json.Marshaler{
+			"/routes": r,
+		},
+	}
+
+	router := &Router{
+		config:     cfg,
+		proxy:      p,
+		mbusClient: mbusClient,
+		registry:   r,
+		varz:       v,
+		component:  component,
+		logger:     steno.NewLogger("router"),
+	}
+
+	if err := router.component.Start(); err != nil {
+		return nil, err
+	}
+
+	return router, nil
 }
 
 func (r *Router) Run() <-chan error {
-	var err error
-
-	util.WritePidFile(r.config.Pidfile)
-
-	natsMembers := []yagnats.ConnectionProvider{}
-
-	for _, info := range r.config.Nats {
-		natsMembers = append(natsMembers, &yagnats.ConnectionInfo{
-			Addr:     fmt.Sprintf("%s:%d", info.Host, info.Port),
-			Username: info.User,
-			Password: info.Pass,
-		})
-	}
-
-	natsInfo := &yagnats.ConnectionCluster{natsMembers}
-
-	for {
-		err = r.mbusClient.Connect(natsInfo)
-		if err == nil {
-			log.Infof("Connected to NATS")
-			break
-		}
-
-		log.Errorf("Could not connect to NATS: %s", err)
-		time.Sleep(500 * time.Millisecond)
-	}
+	r.registry.StartPruningCycle()
 
 	r.RegisterComponent()
 
@@ -138,35 +106,64 @@ func (r *Router) Run() <-chan error {
 	// Wait for one start message send interval, such that the router's registry
 	// can be populated before serving requests.
 	if r.config.StartResponseDelayInterval != 0 {
-		log.Infof("Waiting %s before listening...", r.config.StartResponseDelayInterval)
+		r.logger.Infof("Waiting %s before listening...", r.config.StartResponseDelayInterval)
 		time.Sleep(r.config.StartResponseDelayInterval)
 	}
 
-	listen, err := net.Listen("tcp", fmt.Sprintf(":%d", r.config.Port))
-	if err != nil {
-		log.Fatalf("net.Listen: %s", err)
+	server := http.Server{
+		Handler: autowire.InstrumentedHandler(r.proxy),
 	}
 
-	log.Infof("Listening on %s", listen.Addr())
-
-	server := http.Server{Handler: r.proxy}
-
 	errChan := make(chan error, 1)
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", r.config.Port))
+	if err != nil {
+		r.logger.Fatalf("net.Listen: %s", err)
+		errChan <- err
+		return errChan
+	}
+
+	r.listener = listener
+	r.logger.Infof("Listening on %s", listener.Addr())
+
 	go func() {
-		err := server.Serve(listen)
+		err := server.Serve(listener)
 		errChan <- err
 	}()
 
 	return errChan
 }
 
+func (r *Router) Drain(drainTimeout time.Duration) error {
+	r.listener.Close()
+
+	drained := make(chan struct{})
+	go func() {
+		r.proxy.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(drainTimeout):
+		r.logger.Warn("router.drain.timed-out")
+		return DrainTimeout
+	}
+	return nil
+}
+
+func (r *Router) Stop() {
+	r.listener.Close()
+	r.component.Stop()
+}
+
 func (r *Router) RegisterComponent() {
-	vcap.Register(r.component, r.mbusClient)
+	r.component.Register(r.mbusClient)
 }
 
 func (r *Router) SubscribeRegister() {
 	r.subscribeRegistry("router.register", func(registryMessage *registryMessage) {
-		log.Debugf("Got router.register: %v", registryMessage)
+		r.logger.Debugf("Got router.register: %v", registryMessage)
 
 		for _, uri := range registryMessage.Uris {
 			r.registry.Register(
@@ -179,7 +176,7 @@ func (r *Router) SubscribeRegister() {
 
 func (r *Router) SubscribeUnregister() {
 	r.subscribeRegistry("router.unregister", func(registryMessage *registryMessage) {
-		log.Debugf("Got router.unregister: %v", registryMessage)
+		r.logger.Debugf("Got router.unregister: %v", registryMessage)
 
 		for _, uri := range registryMessage.Uris {
 			r.registry.Unregister(
@@ -232,7 +229,7 @@ func (r *Router) flushApps(t time.Time) {
 
 	y, err := json.Marshal(x)
 	if err != nil {
-		log.Warnf("flushApps: Error marshalling JSON: %s", err)
+		r.logger.Warnf("flushApps: Error marshalling JSON: %s", err)
 		return
 	}
 
@@ -243,7 +240,7 @@ func (r *Router) flushApps(t time.Time) {
 
 	z := b.Bytes()
 
-	log.Debugf("Active apps: %d, message size: %d", len(x), len(z))
+	r.logger.Debugf("Active apps: %d, message size: %d", len(x), len(z))
 
 	r.mbusClient.Publish("router.active_apps", z)
 }
@@ -254,15 +251,10 @@ func (r *Router) greetMessage() ([]byte, error) {
 		return nil, err
 	}
 
-	uuid, err := vcap.GenerateUUID()
-	if err != nil {
-		return nil, err
-	}
-
 	d := vcap.RouterStart{
-		uuid,
-		[]string{host},
-		r.config.StartResponseDelayIntervalInSeconds,
+		Id:    r.component.UUID,
+		Hosts: []string{host},
+		MinimumRegisterIntervalInSeconds: r.config.StartResponseDelayIntervalInSeconds,
 	}
 
 	return json.Marshal(d)
@@ -277,17 +269,17 @@ func (r *Router) subscribeRegistry(subject string, successCallback func(*registr
 		err := json.Unmarshal(payload, &msg)
 		if err != nil {
 			logMessage := fmt.Sprintf("%s: Error unmarshalling JSON (%d; %s): %s", subject, len(payload), payload, err)
-			log.Warnd(map[string]interface{}{"payload": string(payload)}, logMessage)
+			r.logger.Warnd(map[string]interface{}{"payload": string(payload)}, logMessage)
 		}
 
 		logMessage := fmt.Sprintf("%s: Received message", subject)
-		log.Debugd(map[string]interface{}{"message": msg}, logMessage)
+		r.logger.Debugd(map[string]interface{}{"message": msg}, logMessage)
 
 		successCallback(&msg)
 	}
 
 	_, err := r.mbusClient.Subscribe(subject, callback)
 	if err != nil {
-		log.Errorf("Error subscribing to %s: %s", subject, err)
+		r.logger.Errorf("Error subscribing to %s: %s", subject, err)
 	}
 }

@@ -1,162 +1,226 @@
-package route
+package route_test
 
 import (
-	. "launchpad.net/gocheck"
-	"math"
-	"net"
+	. "github.com/nimbus-cloud/gorouter/route"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+	"time"
+        "net"
 )
 
-type PSuite struct{}
 
-func init() {
-	Suite(&PSuite{})
+func endPointInSlice(a *Endpoint, list []*Endpoint) bool {
+    for _, b := range list {
+        if b == a {
+            return true
+        }
+    }
+    return false
 }
 
-func (s *PSuite) TestPoolAddingAndRemoving(c *C) {
-	pool := NewPool(nil)
 
-	endpoint := &Endpoint{}
+var _ = Describe("Pool", func() {
+	var pool *Pool
 
-	pool.Add(endpoint)
+	BeforeEach(func() {
+		pool = NewPool(2 * time.Minute, nil)
+	})
 
-	foundEndpoint, found := pool.Sample()
-	c.Assert(found, Equals, true)
-	c.Assert(foundEndpoint, Equals, endpoint)
+	Context("Put", func() {
+		It("adds endpoints", func() {
+			endpoint := &Endpoint{}
 
-	pool.Remove(endpoint)
+			b := pool.Put(endpoint)
+			Ω(b).Should(BeTrue())
+		})
 
-	_, found = pool.Sample()
-	c.Assert(found, Equals, false)
-}
+		It("handles duplicate endpoints", func() {
+			endpoint := &Endpoint{}
 
-func (s *PSuite) TestPoolAddingDoesNotDuplicate(c *C) {
-	pool := NewPool(nil)
+			pool.Put(endpoint)
+			b := pool.Put(endpoint)
+			Ω(b).Should(BeFalse())
+		})
 
-	endpoint := &Endpoint{}
+		It("handles equivalent (duplicate) endpoints", func() {
+			endpoint1 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
+			endpoint2 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
 
-	pool.Add(endpoint)
-	pool.Add(endpoint)
+			pool.Put(endpoint1)
+			Ω(pool.Put(endpoint2)).Should(BeFalse())
+		})
+	})
 
-	foundEndpoint, found := pool.Sample()
-	c.Assert(found, Equals, true)
-	c.Assert(foundEndpoint, Equals, endpoint)
+	Context("Remove", func() {
+		It("removes endpoints", func() {
+			endpoint := &Endpoint{}
+			pool.Put(endpoint)
 
-	pool.Remove(endpoint)
+			b := pool.Remove(endpoint)
+			Ω(b).Should(BeTrue())
+			Ω(pool.IsEmpty()).Should(BeTrue())
+		})
 
-	_, found = pool.Sample()
-	c.Assert(found, Equals, false)
-}
+		It("fails to remove an endpoint that doesn't exist", func() {
+			endpoint := &Endpoint{}
 
-func (s *PSuite) TestPoolAddingEquivalentEndpointsDoesNotDuplicate(c *C) {
-	pool := NewPool(nil)
+			b := pool.Remove(endpoint)
+			Ω(b).Should(BeFalse())
+		})
+	})
 
-	endpoint1 := &Endpoint{Host: "1.2.3.4", Port: 5678}
-	endpoint2 := &Endpoint{Host: "1.2.3.4", Port: 5678}
+	Context("IsEmpty", func() {
+		It("starts empty", func() {
+			Ω(pool.IsEmpty()).To(BeTrue())
+		})
 
-	pool.Add(endpoint1)
-	pool.Add(endpoint2)
+		It("not empty after adding an endpoint", func() {
+			endpoint := &Endpoint{}
+			pool.Put(endpoint)
 
-	_, found := pool.Sample()
-	c.Assert(found, Equals, true)
+			Ω(pool.IsEmpty()).Should(BeFalse())
+		})
 
-	pool.Remove(endpoint1)
+		It("is empty after removing everything", func() {
+			endpoint := &Endpoint{}
+			pool.Put(endpoint)
+			pool.Remove(endpoint)
 
-	_, found = pool.Sample()
-	c.Assert(found, Equals, false)
-}
+			Ω(pool.IsEmpty()).To(BeTrue())
+		})
+	})
 
-func (s *PSuite) TestPoolIsEmptyInitially(c *C) {
-	c.Assert(NewPool(nil).IsEmpty(), Equals, true)
-}
+	Context("PruneBefore", func() {
+		It("prunes endpoints that haven't been updated", func() {
+			e1 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
+			e2 := NewEndpoint("", "5.6.7.8", 1234, "", nil)
+			pool.Put(e1)
+			pool.Put(e2)
 
-func (s *PSuite) TestPoolIsEmptyAfterRemovingEverything(c *C) {
-	pool := NewPool(nil)
+			t := time.Now().Add(1 * time.Second)
+			pool.PruneBefore(t)
+			Ω(pool.IsEmpty()).Should(BeTrue())
+		})
 
-	endpoint := &Endpoint{}
+		It("does not prune updated endpoints", func() {
+			e1 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
+			e2 := NewEndpoint("", "5.6.7.8", 1234, "", nil)
+			pool.Put(e1)
+			pool.Put(e2)
 
-	pool.Add(endpoint)
+			t := time.Now().Add(-1 * time.Second)
+			pool.PruneBefore(t)
+			Ω(pool.IsEmpty()).Should(BeFalse())
 
-	c.Assert(pool.IsEmpty(), Equals, false)
+			iter := pool.Endpoints("")
+			n1 := iter.Next()
+			n2 := iter.Next()
+			Ω(n1).ShouldNot(Equal(n2))
+		})
+	})
 
-	pool.Remove(endpoint)
+	Context("MarkUpdated", func() {
+		It("updates all endpoints", func() {
+			e1 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
 
-	c.Assert(pool.IsEmpty(), Equals, true)
-}
+			pool.Put(e1)
 
-func (s *PSuite) TestPoolFindByPrivateInstanceId(c *C) {
-	pool := NewPool(nil)
+			t := time.Time{}.Add(1 * time.Second)
+			pool.PruneBefore(t)
+			Ω(pool.IsEmpty()).Should(BeFalse())
 
-	endpointFoo := &Endpoint{Host: "1.2.3.4", Port: 1234, PrivateInstanceId: "foo"}
-	endpointBar := &Endpoint{Host: "5.6.7.8", Port: 5678, PrivateInstanceId: "bar"}
+			pool.MarkUpdated(t)
+			pool.PruneBefore(t)
+			Ω(pool.IsEmpty()).Should(BeFalse())
 
-	pool.Add(endpointFoo)
-	pool.Add(endpointBar)
+			pool.PruneBefore(t.Add(1 * time.Microsecond))
+			Ω(pool.IsEmpty()).Should(BeTrue())
+		})
+	})
 
-	foundEndpoint, found := pool.FindByPrivateInstanceId("foo")
-	c.Assert(found, Equals, true)
-	c.Assert(foundEndpoint, Equals, endpointFoo)
+	Context("Each", func() {
+		It("applies a function to each endpoint", func() {
+			e1 := NewEndpoint("", "1.2.3.4", 5678, "", nil)
+			e2 := NewEndpoint("", "5.6.7.8", 1234, "", nil)
+			pool.Put(e1)
+			pool.Put(e2)
 
-	foundEndpoint, found = pool.FindByPrivateInstanceId("bar")
-	c.Assert(found, Equals, true)
-	c.Assert(foundEndpoint, Equals, endpointBar)
+			endpoints := make(map[string]*Endpoint)
+			pool.Each(func(e *Endpoint) {
+				endpoints[e.CanonicalAddr()] = e
+			})
+			Ω(endpoints).Should(HaveLen(2))
+			Ω(endpoints[e1.CanonicalAddr()]).Should(Equal(e1))
+			Ω(endpoints[e2.CanonicalAddr()]).Should(Equal(e2))
+		})
+	})
 
-	_, found = pool.FindByPrivateInstanceId("quux")
-	c.Assert(found, Equals, false)
-}
+	Context("PreferredNetwork", func() {
+		It("returns only ips from a preferred network", func() {
+			_, testnet, _ := net.ParseCIDR("10.1.1.0/24")
+			
+			e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil)
+			e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil)
+			e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil)
+			
+			pool = NewPool(2 * time.Minute, testnet)
+			pool.Put(e1)
+			pool.Put(e2)
+                        pool.Put(e3)
+			pool.Put(NewEndpoint("", "10.1.2.5", 5678, "", nil))
+			pool.Put(NewEndpoint("", "10.1.2.5", 1234, "", nil))
+			pool.Put(NewEndpoint("", "10.1.2.6", 1234, "", nil))
+			pool.Remove(e3) 
+			
+			iter := pool.Endpoints("")
+			r1 := iter.Next()
+			r2 := iter.Next()
+			r3 := iter.Next()
 
-func (s *PSuite) TestPoolSamplingIsRandomish(c *C) {
-	pool := NewPool(nil)
+			array := [] *Endpoint {e1, e2}
 
-	endpoint1 := &Endpoint{Host: "1.2.3.4", Port: 5678}
-	endpoint2 := &Endpoint{Host: "5.6.7.8", Port: 1234}
+                        Ω(endPointInSlice(r1, array)).Should(Equal(true))
+			Ω(endPointInSlice(r2, array)).Should(Equal(true))
+			Ω(endPointInSlice(r3, array)).Should(Equal(true))
 
-	pool.Add(endpoint1)
-	pool.Add(endpoint2)
+		})
 
-	var occurrences1, occurrences2 int
+                It("returns non preferred networks when preferred aren't available", func() {
+                        _, testnet, _ := net.ParseCIDR("10.1.2.0/24")
 
-	for i := 0; i < 200; i += 1 {
-		foundEndpoint, _ := pool.Sample()
-		if foundEndpoint == endpoint1 {
-			occurrences1 += 1
-		} else {
-			occurrences2 += 1
-		}
-	}
+                        e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil)
+                        e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil)
+                        e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil)
 
-	c.Assert(occurrences1, Not(Equals), 0)
-	c.Assert(occurrences2, Not(Equals), 0)
+                        pool = NewPool(2 * time.Minute, testnet)
+                        pool.Put(e1)
+                        pool.Put(e2)
+                        pool.Put(e3)
+                        pool.Remove(e3)
 
-	// they should be arbitrarily close
-	c.Assert(math.Abs(float64(occurrences1-occurrences2)) < 50, Equals, true)
-}
+			array := [] *Endpoint {e1, e2}
 
-func (s *PSuite) TestPoolMarshalsAsJSON(c *C) {
-	pool := NewPool(nil)
+                        iter := pool.Endpoints("")
+                        r1 := iter.Next()
+                        r2 := iter.Next()
+                        r3 := iter.Next()
 
-	pool.Add(&Endpoint{Host: "1.2.3.4", Port: 5678})
+                        Ω(endPointInSlice(r1, array)).Should(Equal(true))
+                        Ω(endPointInSlice(r2, array)).Should(Equal(true))
+                        Ω(endPointInSlice(r3, array)).Should(Equal(true))
 
-	json, err := pool.MarshalJSON()
-	c.Assert(err, IsNil)
+                })
 
-	c.Assert(string(json), Equals, `["1.2.3.4:5678"]`)
-}
+	})
 
-func (s *PSuite) TestPreferredNetwork(c *C) {
 
-	_, testnet, _ := net.ParseCIDR("10.1.1.0/24")
+	It("marshals json", func() {
+		e := NewEndpoint("", "1.2.3.4", 5678, "", nil)
+		pool.Put(e)
 
-	pool := NewPool(testnet)
+		json, err := pool.MarshalJSON()
+		Ω(err).ToNot(HaveOccurred())
 
-	endpoint1 := &Endpoint{Host: "10.1.1.5", Port: 5678} 
-
-	pool.Add(endpoint1)
-	pool.Add(&Endpoint{Host: "10.1.2.5", Port: 5678})
-	pool.Add(&Endpoint{Host: "10.1.2.6", Port: 5678})
-	pool.Add(&Endpoint{Host: "10.1.2.7", Port: 5678})
-	
-	foundEndpoint, found := pool.Sample()
-	
-	c.Assert(found, Equals, true)
-	c.Assert(foundEndpoint, Equals, endpoint1)
-}
+		Ω(string(json)).To(Equal(`["1.2.3.4:5678"]`))
+	})
+})

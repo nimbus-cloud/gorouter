@@ -129,7 +129,7 @@ func (p *Pool) removeEndpoint(e *endpointElem) {
 		// re-ordering delete
 		es[last-1], es[pi], es = nil, es[last-1], es[:last-1]
 		if pi < last-1 {
-			es[pi].index = pi
+			es[pi].preferred_index = pi
 		}
 		p.preferred_endpoints = es
 	}

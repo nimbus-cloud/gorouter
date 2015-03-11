@@ -52,7 +52,7 @@ func (r *AccessLogRecord) makeRecord() *bytes.Buffer {
 	fmt.Fprintf(b, `"%s" `, r.FormatRequestHeader("Referer"))
 	fmt.Fprintf(b, `"%s" `, r.FormatRequestHeader("User-Agent"))
 	fmt.Fprintf(b, `%s `, r.Request.RemoteAddr)
-	fmt.Fprintf(b, `x_forwarded_for:"%s" `, r.FormatRequestHeader("X-Forwarded-For"))
+	fmt.Fprintf(b, `x_lb_forwarded_for:"%s" `, r.FormatRequestHeader("X-LB-Forwarded-For"))
 	fmt.Fprintf(b, `vcap_request_id:%s `, r.FormatRequestHeader("X-Vcap-Request-Id"))
 
 	if r.ResponseTime() < 0 {
@@ -62,9 +62,11 @@ func (r *AccessLogRecord) makeRecord() *bytes.Buffer {
 	}
 
 	if r.RouteEndpoint == nil {
-		fmt.Fprintf(b, "app_id:MissingRouteEndpointApplicationId")
+		fmt.Fprintf(b, "app_id:MissingRouteEndpointApplicationId ")
+		fmt.Fprintf(b, "dest:MissingEndpoint ")
 	} else {
-		fmt.Fprintf(b, `app_id:%s`, r.RouteEndpoint.ApplicationId)
+		fmt.Fprintf(b, `app_id:%s `, r.RouteEndpoint.ApplicationId)
+		fmt.Fprintf(b, `dest:%s`, r.RouteEndpoint.CanonicalAddr())
 	}
 
 	fmt.Fprint(b, "\n")

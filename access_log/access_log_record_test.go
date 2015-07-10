@@ -28,7 +28,8 @@ var _ = Describe("AccessLogRecord", func() {
 			"x_forwarded_for:\"FakeProxy1, FakeProxy2\" " +
 			"vcap_request_id:abc-123-xyz-pdq " +
 			"response_time:60.000000000 " +
-			"app_id:FakeApplicationId\n"
+			"app_id:FakeApplicationId " +
+			"dest:\n"
 
 		Expect(record.LogMessage()).To(Equal(recordString))
 	})
@@ -62,7 +63,8 @@ var _ = Describe("AccessLogRecord", func() {
 			"x_forwarded_for:\"-\" " +
 			"vcap_request_id:- " +
 			"response_time:MissingFinishedAt " +
-			"app_id:FakeApplicationId\n"
+			"app_id:FakeApplicationId " +
+			"dest:\n"
 
 		Expect(record.LogMessage()).To(Equal(recordString))
 	})

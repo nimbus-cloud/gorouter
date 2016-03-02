@@ -1,30 +1,31 @@
 package router_test
 
 import (
-	"github.com/nimbus-cloud/gorouter/access_log"
-	vcap "github.com/nimbus-cloud/gorouter/common"
-	cfg "github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/proxy"
-	rregistry "github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/route"
-	. "github.com/nimbus-cloud/gorouter/router"
-	"github.com/nimbus-cloud/gorouter/test"
-	"github.com/nimbus-cloud/gorouter/test_util"
-	vvarz "github.com/nimbus-cloud/gorouter/varz"
+	"io/ioutil"
+	"net/http"
+	"time"
+
+	"github.com/cloudfoundry/gorouter/access_log"
+	vcap "github.com/cloudfoundry/gorouter/common"
+	cfg "github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/proxy"
+	rregistry "github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/route"
+	. "github.com/cloudfoundry/gorouter/router"
+	"github.com/cloudfoundry/gorouter/test"
+	"github.com/cloudfoundry/gorouter/test_util"
+	vvarz "github.com/cloudfoundry/gorouter/varz"
 	"github.com/cloudfoundry/gunk/natsrunner"
 	"github.com/cloudfoundry/yagnats"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"io/ioutil"
-	"net/http"
-	"time"
 )
 
 var _ = Describe("Router", func() {
 	var natsRunner *natsrunner.NATSRunner
 	var config *cfg.Config
 
-	var mbusClient *yagnats.Client
+	var mbusClient yagnats.NATSConn
 	var registry *rregistry.RouteRegistry
 	var varz vvarz.Varz
 	var router *Router
@@ -41,7 +42,7 @@ var _ = Describe("Router", func() {
 		config = test_util.SpecConfig(natsPort, statusPort, proxyPort)
 		config.EndpointTimeout = 5 * time.Second
 
-		mbusClient = natsRunner.MessageBus.(*yagnats.Client)
+		mbusClient = natsRunner.MessageBus
 		registry = rregistry.NewRouteRegistry(config, mbusClient)
 		varz = vvarz.NewVarz(registry)
 		logcounter := vcap.NewLogCounter()
@@ -108,7 +109,7 @@ var _ = Describe("Router", func() {
 
 			go func() {
 				defer GinkgoRecover()
-				err := router.Drain(2 * time.Second)
+				err := router.Drain(1 * time.Second)
 				Ω(err).ShouldNot(HaveOccurred())
 				resultCh <- true
 			}()
@@ -118,7 +119,7 @@ var _ = Describe("Router", func() {
 			blocker <- false
 
 			var result bool
-			Eventually(resultCh).Should(Receive(&result))
+			Eventually(resultCh, 2).Should(Receive(&result))
 			Ω(result).To(BeTrue())
 		})
 

@@ -1,17 +1,22 @@
 package router
 
 import (
-	"github.com/cloudfoundry-incubator/dropsonde/autowire"
-	vcap "github.com/nimbus-cloud/gorouter/common"
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/proxy"
-	"github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/varz"
+	"sync"
+
+	"github.com/apcera/nats"
+	"github.com/cloudfoundry/dropsonde"
+	vcap "github.com/cloudfoundry/gorouter/common"
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/proxy"
+	"github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/varz"
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
+	"github.com/pivotal-golang/localip"
 
 	"bytes"
 	"compress/zlib"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,21 +26,30 @@ import (
 )
 
 var DrainTimeout = errors.New("router: Drain timeout")
+var noDeadline = time.Time{}
 
 type Router struct {
 	config     *config.Config
 	proxy      proxy.Proxy
-	mbusClient *yagnats.Client
+	mbusClient yagnats.NATSConn
 	registry   *registry.RouteRegistry
 	varz       varz.Varz
 	component  *vcap.VcapComponent
 
-	listener net.Listener
+	listener         net.Listener
+	tlsListener      net.Listener
+	closeConnections bool
+	connLock         sync.Mutex
+	idleConns        map[net.Conn]struct{}
+	activeConns      map[net.Conn]struct{}
+	drainDone        chan struct{}
+	serveDone        chan struct{}
+	tlsServeDone     chan struct{}
 
 	logger *steno.Logger
 }
 
-func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient *yagnats.Client, r *registry.RouteRegistry, v varz.Varz,
+func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r *registry.RouteRegistry, v varz.Varz,
 	logCounter *vcap.LogCounter) (*Router, error) {
 
 	var host string
@@ -66,13 +80,17 @@ func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient *yagnats.Client, r 
 	}
 
 	router := &Router{
-		config:     cfg,
-		proxy:      p,
-		mbusClient: mbusClient,
-		registry:   r,
-		varz:       v,
-		component:  component,
-		logger:     steno.NewLogger("router"),
+		config:       cfg,
+		proxy:        p,
+		mbusClient:   mbusClient,
+		registry:     r,
+		varz:         v,
+		component:    component,
+		serveDone:    make(chan struct{}),
+		tlsServeDone: make(chan struct{}),
+		idleConns:    make(map[net.Conn]struct{}),
+		activeConns:  make(map[net.Conn]struct{}),
+		logger:       steno.NewLogger("router"),
 	}
 
 	if err := router.component.Start(); err != nil {
@@ -95,10 +113,10 @@ func (r *Router) Run() <-chan error {
 	// Kickstart sending start messages
 	r.SendStartMessage()
 
-	// Send start again on reconnect
-	r.mbusClient.ConnectedCallback = func() {
+	r.mbusClient.AddReconnectedCB(func(conn *nats.Conn) {
+		r.logger.Infof("Reconnecting to NATS server %s...", conn.Opts.Url)
 		r.SendStartMessage()
-	}
+	})
 
 	// Schedule flushing active app's app_id
 	r.ScheduleFlushApps()
@@ -110,17 +128,57 @@ func (r *Router) Run() <-chan error {
 		time.Sleep(r.config.StartResponseDelayInterval)
 	}
 
-	server := http.Server{
-		Handler: autowire.InstrumentedHandler(r.proxy),
+	server := &http.Server{
+		Handler:   dropsonde.InstrumentedHandler(r.proxy),
+		ConnState: r.HandleConnState,
 	}
 
-	errChan := make(chan error, 1)
+	errChan := make(chan error, 2)
 
+	err := r.serveHTTP(server, errChan)
+	if err != nil {
+		errChan <- err
+		return errChan
+	}
+	err = r.serveHTTPS(server, errChan)
+	if err != nil {
+		errChan <- err
+		return errChan
+	}
+
+	return errChan
+}
+
+func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
+	if r.config.EnableSSL {
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{r.config.SSLCertificate},
+			CipherSuites: r.config.CipherSuites,
+		}
+
+		tlsListener, err := tls.Listen("tcp", fmt.Sprintf(":%d", r.config.SSLPort), tlsConfig)
+		if err != nil {
+			r.logger.Fatalf("tls.Listen: %s", err)
+			return err
+		}
+
+		r.tlsListener = tlsListener
+		r.logger.Infof("Listening on %s", tlsListener.Addr())
+
+		go func() {
+			err := server.Serve(tlsListener)
+			errChan <- err
+			close(r.tlsServeDone)
+		}()
+	}
+	return nil
+}
+
+func (r *Router) serveHTTP(server *http.Server, errChan chan error) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", r.config.Port))
 	if err != nil {
 		r.logger.Fatalf("net.Listen: %s", err)
-		errChan <- err
-		return errChan
+		return err
 	}
 
 	r.listener = listener
@@ -129,19 +187,27 @@ func (r *Router) Run() <-chan error {
 	go func() {
 		err := server.Serve(listener)
 		errChan <- err
+		close(r.serveDone)
 	}()
-
-	return errChan
+	return nil
 }
 
 func (r *Router) Drain(drainTimeout time.Duration) error {
-	r.listener.Close()
+	r.stopListening()
 
 	drained := make(chan struct{})
-	go func() {
-		r.proxy.Wait()
+	r.connLock.Lock()
+
+	r.logger.Infof("Draining with %d outstanding active connections", len(r.activeConns))
+	r.logger.Infof("Draining with %d outstanding idle connections", len(r.idleConns))
+	r.closeIdleConns()
+
+	if len(r.activeConns) == 0 {
 		close(drained)
-	}()
+	} else {
+		r.drainDone = drained
+	}
+	r.connLock.Unlock()
 
 	select {
 	case <-drained:
@@ -153,8 +219,33 @@ func (r *Router) Drain(drainTimeout time.Duration) error {
 }
 
 func (r *Router) Stop() {
-	r.listener.Close()
+	r.stopListening()
+
+	r.connLock.Lock()
+	r.closeIdleConns()
+	r.connLock.Unlock()
+
 	r.component.Stop()
+}
+
+// connLock must be locked
+func (r *Router) closeIdleConns() {
+	r.closeConnections = true
+
+	for conn, _ := range r.idleConns {
+		conn.Close()
+	}
+}
+
+func (r *Router) stopListening() {
+	r.listener.Close()
+
+	if r.tlsListener != nil {
+		r.tlsListener.Close()
+		<-r.tlsServeDone
+	}
+
+	<-r.serveDone
 }
 
 func (r *Router) RegisterComponent() {
@@ -188,9 +279,9 @@ func (r *Router) SubscribeUnregister() {
 }
 
 func (r *Router) HandleGreetings() {
-	r.mbusClient.Subscribe("router.greet", func(msg *yagnats.Message) {
+	r.mbusClient.Subscribe("router.greet", func(msg *nats.Msg) {
 		response, _ := r.greetMessage()
-		r.mbusClient.Publish(msg.ReplyTo, response)
+		r.mbusClient.Publish(msg.Reply, response)
 	})
 }
 
@@ -201,7 +292,7 @@ func (r *Router) SendStartMessage() {
 	}
 
 	// Send start message once at start
-	r.mbusClient.Publish("router.start", b)
+	err = r.mbusClient.Publish("router.start", b)
 }
 
 func (r *Router) ScheduleFlushApps() {
@@ -222,6 +313,47 @@ func (r *Router) ScheduleFlushApps() {
 			}
 		}
 	}()
+}
+
+func (r *Router) HandleConnState(conn net.Conn, state http.ConnState) {
+	endpointTimeout := r.config.EndpointTimeout
+
+	r.connLock.Lock()
+
+	switch state {
+	case http.StateActive:
+		r.activeConns[conn] = struct{}{}
+		delete(r.idleConns, conn)
+
+		conn.SetDeadline(time.Time{})
+	case http.StateIdle:
+		delete(r.activeConns, conn)
+		r.idleConns[conn] = struct{}{}
+
+		if r.closeConnections {
+			conn.Close()
+		} else {
+			deadline := noDeadline
+			if endpointTimeout > 0 {
+				deadline = time.Now().Add(endpointTimeout)
+			}
+
+			conn.SetDeadline(deadline)
+		}
+	case http.StateHijacked, http.StateClosed:
+		i := len(r.idleConns)
+		delete(r.idleConns, conn)
+		if i == len(r.idleConns) {
+			delete(r.activeConns, conn)
+		}
+	}
+
+	if r.drainDone != nil && len(r.activeConns) == 0 {
+		close(r.drainDone)
+		r.drainDone = nil
+	}
+
+	r.connLock.Unlock()
 }
 
 func (r *Router) flushApps(t time.Time) {
@@ -246,7 +378,7 @@ func (r *Router) flushApps(t time.Time) {
 }
 
 func (r *Router) greetMessage() ([]byte, error) {
-	host, err := vcap.LocalIP()
+	host, err := localip.LocalIP()
 	if err != nil {
 		return nil, err
 	}
@@ -255,14 +387,15 @@ func (r *Router) greetMessage() ([]byte, error) {
 		Id:    r.component.UUID,
 		Hosts: []string{host},
 		MinimumRegisterIntervalInSeconds: r.config.StartResponseDelayIntervalInSeconds,
+		PruneThresholdInSeconds:          r.config.DropletStaleThresholdInSeconds,
 	}
 
 	return json.Marshal(d)
 }
 
 func (r *Router) subscribeRegistry(subject string, successCallback func(*registryMessage)) {
-	callback := func(message *yagnats.Message) {
-		payload := message.Payload
+	callback := func(message *nats.Msg) {
+		payload := message.Data
 
 		var msg registryMessage
 

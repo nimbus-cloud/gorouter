@@ -5,7 +5,7 @@
 This repository contains the source code for a Go implementation of the Cloud
 Foundry router.
 
-This router is now used on CloudFoundry.com, replacing the old implementation.
+You can find the old router [here](http://github.com/cloudfoundry-attic/router)
 
 ## Summary
 
@@ -38,11 +38,9 @@ standalone environment.
 
 Download gorouter:
 ```bash
-<<<<<<< HEAD
-go get -v github.com/tools/godep
-go get -v github.com/nimbus-cloud/gorouter
-
-cd $GOPATH/src/github.com/nimbus-cloud/gorouter
+go get -d github.com/cloudfoundry/gorouter
+cd $GOPATH/src/github.com/cloudfoundry/gorouter
+```
 
 To install exactly the dependecies vendored with gorouter, use [godep](https://github.com/tools/godep):
 
@@ -109,26 +107,31 @@ gorouter
 
 ### Usage
 
-When gorouter starts, it sends `router.start`. This message contains an
-interval that other components should then send `router.register` on. If they
-do not send a `router.register` for an amount of time considered "stale" by the
-router, the routes are pruned. The default "staleness" is 2 minutes.
+When the gorouter starts, it sends a `router.start` message.
+This message contains an interval that other components should then send `router.register` on, `minimumRegisterIntervalInSeconds`.
+It is recommended that clients should send `router.register` messages on this interval.
+This `minimumRegisterIntervalInSeconds` value is configured through the `start_response_delay_interval` configuration value.
+The gorouter will prune routes that it considers to be stale based upon a seperate "staleness" value, `droplet_stale_threshold`, which defaults to 120 seconds.
+The gorouter will check if routes have become stale on an interval defined by `prune_stale_droplets_interval`, which defaults to 30 seconds.
+All of these values are represented in seconds and will always be integers.
 
-The format of this message is as follows:
+The format of the `router.start` message is as follows:
 
 ```json
 {
   "id": "some-router-id",
   "hosts": ["1.2.3.4"],
-  "minimumRegisterIntervalInSeconds": 5
+  "minimumRegisterIntervalInSeconds": 5,
+  "prunteThresholdInSeconds": 120,
 }
 ```
+After a `router.start` message is received by a client, the client should send `router.register` messages. This ensures that the new router can update its routing table and synchronize with existing routers.
 
 If a component comes online after the router, it must make a NATS request
 called `router.greet` in order to determine the interval. The response to this
 message will be the same format as `router.start`.
 
-The format of route updates are as follows:
+The format of the `router.register` message is as follows:
 
 ```json
 {
@@ -141,24 +144,44 @@ The format of route updates are as follows:
   "tags": {
     "another_key": "another_value",
     "some_key": "some_value"
-  }
+  },
+  "app": "some_app_guid",
+  "stale_threshold_in_seconds": 120,
+  "private_instance_id": "some_app_instance_id"
 }
 ```
+`stale_threshold_in_seconds` is the custom staleness threshold for the route being registered. If this value is not sent, it will default to the router's default staleness threshold.
+`app` is a unique identifier for an application that the route is registered for. It is used to emit router access logs associated with the app through dropsonde.
+`private_instance_id` is a unique identifier for an instance associated with the app identified by the `app` field. `X-CF-InstanceID` is set to this value on the request to the endpoint registered.
 
 Such a message can be sent to both the `router.register` subject to register
-URIs, and to the `router.unregister` subject to unregister URIs, respectively.
+URIs, and to the `router.unregister` subject to unregister URIs, respectively. 
 
+###Example
+
+Create a simple app
 ```
 $ nohup ruby -rsinatra -e 'get("/") { "Hello!" }' &
+```
+
+Send a register message
+```
 $ nats-pub 'router.register' '{"host":"127.0.0.1","port":4567,"uris":["my_first_url.vcap.me","my_second_url.vcap.me"],"tags":{"another_key":"another_value","some_key":"some_value"}}'
+
 Published [router.register] : '{"host":"127.0.0.1","port":4567,"uris":["my_first_url.vcap.me","my_second_url.vcap.me"],"tags":{"another_key":"another_value","some_key":"some_value"}}'
+```
+
+See that it works!
+```
 $ curl my_first_url.vcap.me:8080
 Hello!
 ```
 
 ### Instrumentation
 
-Gorouter provides `/varz` and `/healthz` http endpoints for monitoring.
+Gorouter provides a `/varz` http endpoint for monitoring.
+
+There is a *deprecated* `healthz` endpoint that provides no useful information about the router. To check on the health of the router, we currently recommend checking the status of TCP port 80.
 
 The `/routes` endpoint returns the entire routing table as JSON. Each route has an associated array of host:port entries.
 
@@ -225,4 +248,4 @@ to prune routes for stale droplets.
 
 ## Contributing
 
-Please read the [contributors' guide](https://github.com/nimbus-cloud/gorouter/blob/master/CONTRIBUTING.md)
+Please read the [contributors' guide](https://github.com/cloudfoundry/gorouter/blob/master/CONTRIBUTING.md)

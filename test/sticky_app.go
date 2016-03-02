@@ -2,15 +2,16 @@ package test
 
 import (
 	"fmt"
-	"github.com/cloudfoundry/yagnats"
 	"io"
 	"net/http"
 
-	"github.com/nimbus-cloud/gorouter/proxy"
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/yagnats"
+
+	"github.com/cloudfoundry/gorouter/proxy"
+	"github.com/cloudfoundry/gorouter/route"
 )
 
-func NewStickyApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSClient, tags map[string]string) *TestApp {
+func NewStickyApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSConn, tags map[string]string) *TestApp {
 	app := NewTestApp(urls, rPort, mbusClient, tags)
 	app.AddHandler("/sticky", stickyHandler(app.port))
 

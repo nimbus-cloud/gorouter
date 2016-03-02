@@ -5,6 +5,7 @@ import (
 	"github.com/nimbus-cloud/gorouter/route"
 	"github.com/cloudfoundry/yagnats"
 	. "github.com/onsi/gomega"
+	"github.com/pivotal-golang/localip"
 
 	"encoding/json"
 	"errors"
@@ -20,16 +21,16 @@ type TestApp struct {
 	port       uint16      // app listening port
 	rPort      uint16      // router listening port
 	urls       []route.Uri // host registered host name
-	mbusClient yagnats.NATSClient
+	mbusClient yagnats.NATSConn
 	tags       map[string]string
 	mux        *http.ServeMux
 	stopped    bool
 }
 
-func NewTestApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSClient, tags map[string]string) *TestApp {
+func NewTestApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSConn, tags map[string]string) *TestApp {
 	app := new(TestApp)
 
-	port, _ := common.GrabEphemeralPort()
+	port, _ := localip.LocalPort()
 
 	app.port = port
 	app.rPort = rPort
@@ -83,6 +84,7 @@ func (a *TestApp) Register() {
 		Tags: a.tags,
 		Dea:  "dea",
 		App:  "0",
+		StaleThresholdInSeconds: 1,
 
 		PrivateInstanceId: uuid,
 	}
@@ -108,8 +110,9 @@ func (a *TestApp) Unregister() {
 }
 
 func (a *TestApp) VerifyAppStatus(status int) {
-	check := a.CheckAppStatus(status)
-	Ω(check).ShouldNot(HaveOccurred())
+	Eventually(func() error {
+		return a.CheckAppStatus(status)
+	}, 2*time.Second).ShouldNot(HaveOccurred())
 }
 
 func (a *TestApp) CheckAppStatus(status int) error {
@@ -147,12 +150,13 @@ func (a *TestApp) isStopped() bool {
 }
 
 type registerMessage struct {
-	Host string            `json:"host"`
-	Port uint16            `json:"port"`
-	Uris []route.Uri       `json:"uris"`
-	Tags map[string]string `json:"tags"`
-	Dea  string            `json:"dea"`
-	App  string            `json:"app"`
+	Host                    string            `json:"host"`
+	Port                    uint16            `json:"port"`
+	Uris                    []route.Uri       `json:"uris"`
+	Tags                    map[string]string `json:"tags"`
+	Dea                     string            `json:"dea"`
+	App                     string            `json:"app"`
+	StaleThresholdInSeconds int               `json:"stale_threshold_in_seconds"`
 
 	PrivateInstanceId string `json:"private_instance_id"`
 }

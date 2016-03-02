@@ -2,17 +2,17 @@ package proxy
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/cloudfoundry-incubator/dropsonde/autowire"
-	"github.com/nimbus-cloud/gorouter/access_log"
-	router_http "github.com/nimbus-cloud/gorouter/common/http"
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/dropsonde"
+	"github.com/cloudfoundry/gorouter/access_log"
+	router_http "github.com/cloudfoundry/gorouter/common/http"
+	"github.com/cloudfoundry/gorouter/route"
 	steno "github.com/cloudfoundry/gosteno"
 )
 
@@ -39,7 +39,6 @@ type ProxyReporter interface {
 
 type Proxy interface {
 	ServeHTTP(responseWriter http.ResponseWriter, request *http.Request)
-	Wait()
 }
 
 type ProxyArgs struct {
@@ -49,22 +48,22 @@ type ProxyArgs struct {
 	Registry        LookupRegistry
 	Reporter        ProxyReporter
 	AccessLogger    access_log.AccessLogger
+	SecureCookies   bool
 }
 
 type proxy struct {
-	ip           string
-	traceKey     string
-	logger       *steno.Logger
-	registry     LookupRegistry
-	reporter     ProxyReporter
-	accessLogger access_log.AccessLogger
-	transport    *http.Transport
-
-	waitgroup *sync.WaitGroup
+	ip            string
+	traceKey      string
+	logger        *steno.Logger
+	registry      LookupRegistry
+	reporter      ProxyReporter
+	accessLogger  access_log.AccessLogger
+	transport     *http.Transport
+	secureCookies bool
 }
 
 func NewProxy(args ProxyArgs) Proxy {
-	return &proxy{
+	p := &proxy{
 		accessLogger: args.AccessLogger,
 		traceKey:     args.TraceKey,
 		ip:           args.Ip,
@@ -82,11 +81,12 @@ func NewProxy(args ProxyArgs) Proxy {
 				}
 				return conn, err
 			},
-			DisableKeepAlives:     true,
-			ResponseHeaderTimeout: args.EndpointTimeout,
+			DisableKeepAlives:  true,
+			DisableCompression: true,
 		},
-		waitgroup: &sync.WaitGroup{},
+		secureCookies: args.SecureCookies,
 	}
+	return p
 }
 
 func hostWithoutPort(req *http.Request) string {
@@ -101,10 +101,6 @@ func hostWithoutPort(req *http.Request) string {
 	return host
 }
 
-func (p *proxy) Wait() {
-	p.waitgroup.Wait()
-}
-
 func (p *proxy) getStickySession(request *http.Request) string {
 	// Try choosing a backend using sticky session
 	if _, err := request.Cookie(StickyCookieKey); err == nil {
@@ -116,8 +112,7 @@ func (p *proxy) getStickySession(request *http.Request) string {
 }
 
 func (p *proxy) lookup(request *http.Request) *route.Pool {
-	uri := route.Uri(hostWithoutPort(request))
-	// Choose backend using host alone
+	uri := route.Uri(hostWithoutPort(request) + request.RequestURI)
 	return p.registry.Lookup(uri)
 }
 
@@ -129,13 +124,14 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 		StartedAt: startedAt,
 	}
 
+	requestBodyCounter := &countingReadCloser{delegate: request.Body}
+	request.Body = requestBodyCounter
+
 	handler := NewRequestHandler(request, responseWriter, p.reporter, &accessLog)
 
-	p.waitgroup.Add(1)
-
 	defer func() {
+		accessLog.RequestBytesReceived = requestBodyCounter.count
 		p.accessLogger.Log(accessLog)
-		p.waitgroup.Done()
 	}()
 
 	if !isProtocolSupported(request) {
@@ -180,7 +176,7 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 
 	proxyWriter := newProxyResponseWriter(responseWriter)
 	roundTripper := &proxyRoundTripper{
-		transport: p.transport,
+		transport: dropsonde.InstrumentedRoundTripper(p.transport),
 		iter:      iter,
 		handler:   &handler,
 
@@ -189,9 +185,6 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 			if rsp != nil {
 				accessLog.StatusCode = rsp.StatusCode
 			}
-
-			// disable keep-alives -- not needed with Go 1.3
-			responseWriter.Header().Set("Connection", "close")
 
 			if p.traceKey != "" && request.Header.Get(router_http.VcapTraceHeader) == p.traceKey {
 				setTraceHeaders(responseWriter, p.ip, endpoint.CanonicalAddr())
@@ -209,16 +202,15 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 			}
 
 			if endpoint.PrivateInstanceId != "" {
-				setupStickySession(responseWriter, rsp, endpoint)
+				setupStickySession(responseWriter, rsp, endpoint, stickyEndpointId, p.secureCookies)
 			}
 		},
 	}
-	proxyTransport := autowire.InstrumentedRoundTripper(roundTripper)
 
-	p.newReverseProxy(proxyTransport, request).ServeHTTP(proxyWriter, request)
+	p.newReverseProxy(roundTripper, request).ServeHTTP(proxyWriter, request)
 
 	accessLog.FinishedAt = time.Now()
-	accessLog.BodyBytesSent = int64(proxyWriter.Size())
+	accessLog.BodyBytesSent = proxyWriter.Size()
 }
 
 func (p *proxy) newReverseProxy(proxyTransport http.RoundTripper, req *http.Request) http.Handler {
@@ -226,8 +218,8 @@ func (p *proxy) newReverseProxy(proxyTransport http.RoundTripper, req *http.Requ
 		Director: func(request *http.Request) {
 			request.URL.Scheme = "http"
 			request.URL.Host = req.Host
-			request.URL.Opaque = req.URL.Opaque
-			request.URL.RawQuery = req.URL.RawQuery
+			request.URL.Opaque = req.RequestURI
+			request.URL.RawQuery = ""
 
 			setRequestXRequestStart(req)
 			setRequestXVcapRequestId(req, nil)
@@ -315,20 +307,37 @@ func (i *wrappedIterator) EndpointFailed() {
 	i.nested.EndpointFailed()
 }
 
-func setupStickySession(responseWriter http.ResponseWriter, response *http.Response, endpoint *route.Endpoint) {
+func setupStickySession(responseWriter http.ResponseWriter, response *http.Response,
+	endpoint *route.Endpoint,
+	originalEndpointId string,
+	secureCookies bool) {
+
+	maxAge := 0
+
+	// did the endpoint change?
+	sticky := originalEndpointId != "" && originalEndpointId != endpoint.PrivateInstanceId
+
 	for _, v := range response.Cookies() {
 		if v.Name == StickyCookieKey {
-			cookie := &http.Cookie{
-				Name:  VcapCookieId,
-				Value: endpoint.PrivateInstanceId,
-				Path:  "/",
-
-				HttpOnly: true,
+			sticky = true
+			if v.MaxAge < 0 {
+				maxAge = v.MaxAge
 			}
-
-			http.SetCookie(responseWriter, cookie)
-			return
+			break
 		}
+	}
+
+	if sticky {
+		cookie := &http.Cookie{
+			Name:     VcapCookieId,
+			Value:    endpoint.PrivateInstanceId,
+			Path:     "/",
+			MaxAge:   maxAge,
+			HttpOnly: true,
+			Secure:   secureCookies,
+		}
+
+		http.SetCookie(responseWriter, cookie)
 	}
 }
 
@@ -365,4 +374,19 @@ func setTraceHeaders(responseWriter http.ResponseWriter, routerIp, addr string) 
 	responseWriter.Header().Set(router_http.VcapRouterHeader, routerIp)
 	responseWriter.Header().Set(router_http.VcapBackendHeader, addr)
 	responseWriter.Header().Set(router_http.CfRouteEndpointHeader, addr)
+}
+
+type countingReadCloser struct {
+	delegate io.ReadCloser
+	count    int
+}
+
+func (crc *countingReadCloser) Read(b []byte) (int, error) {
+	n, err := crc.delegate.Read(b)
+	crc.count += n
+	return n, err
+}
+
+func (crc *countingReadCloser) Close() error {
+	return crc.delegate.Close()
 }

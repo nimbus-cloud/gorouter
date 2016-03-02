@@ -1,10 +1,10 @@
 package access_log_test
 
 import (
-	. "github.com/nimbus-cloud/gorouter/access_log"
+	. "github.com/cloudfoundry/gorouter/access_log"
 
-	router_http "github.com/nimbus-cloud/gorouter/common/http"
-	"github.com/nimbus-cloud/gorouter/route"
+	router_http "github.com/cloudfoundry/gorouter/common/http"
+	"github.com/cloudfoundry/gorouter/route"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
@@ -21,6 +21,7 @@ var _ = Describe("AccessLogRecord", func() {
 			"[01/01/2000:00:00:00 +0000] " +
 			"\"FakeRequestMethod http://example.com/request FakeRequestProto\" " +
 			"200 " +
+			"30 " +
 			"23 " +
 			"\"FakeReferer\" " +
 			"\"FakeUserAgent\" " +
@@ -29,7 +30,8 @@ var _ = Describe("AccessLogRecord", func() {
 			"vcap_request_id:abc-123-xyz-pdq " +
 			"response_time:60.000000000 " +
 			"app_id:FakeApplicationId " +
-			"dest:\n"
+			"dest:" +
+			"\n"
 
 		Expect(record.LogMessage()).To(Equal(recordString))
 	})
@@ -57,6 +59,7 @@ var _ = Describe("AccessLogRecord", func() {
 			"\"FakeRequestMethod http://example.com/request FakeRequestProto\" " +
 			"MissingResponseStatusCode " +
 			"0 " +
+			"0 " +
 			"\"-\" " +
 			"\"-\" " +
 			"FakeRemoteAddr " +
@@ -64,7 +67,8 @@ var _ = Describe("AccessLogRecord", func() {
 			"vcap_request_id:- " +
 			"response_time:MissingFinishedAt " +
 			"app_id:FakeApplicationId " +
-			"dest:\n"
+			"dest:" +
+			"\n"
 
 		Expect(record.LogMessage()).To(Equal(recordString))
 	})
@@ -98,7 +102,8 @@ func CompleteAccessLogRecord() AccessLogRecord {
 		RouteEndpoint: &route.Endpoint{
 			ApplicationId: "FakeApplicationId",
 		},
-		StartedAt:  time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
-		FinishedAt: time.Date(2000, time.January, 1, 0, 1, 0, 0, time.UTC),
+		StartedAt:            time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+		FinishedAt:           time.Date(2000, time.January, 1, 0, 1, 0, 0, time.UTC),
+		RequestBytesReceived: 30,
 	}
 }

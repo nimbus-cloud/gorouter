@@ -1,13 +1,19 @@
 package main
 
 import (
-	"github.com/nimbus-cloud/gorouter/access_log"
-	vcap "github.com/nimbus-cloud/gorouter/common"
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/proxy"
-	rregistry "github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/router"
-	rvarz "github.com/nimbus-cloud/gorouter/varz"
+	"github.com/apcera/nats"
+	cf_debug_server "github.com/cloudfoundry-incubator/cf-debug-server"
+	"github.com/cloudfoundry-incubator/routing-api"
+	token_fetcher "github.com/cloudfoundry-incubator/uaa-token-fetcher"
+	"github.com/cloudfoundry/dropsonde"
+	"github.com/cloudfoundry/gorouter/access_log"
+	vcap "github.com/cloudfoundry/gorouter/common"
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/proxy"
+	rregistry "github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/route_fetcher"
+	"github.com/cloudfoundry/gorouter/router"
+	rvarz "github.com/cloudfoundry/gorouter/varz"
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
 
@@ -30,8 +36,19 @@ func init() {
 
 func main() {
 	c := config.DefaultConfig()
+	logCounter := vcap.NewLogCounter()
+
 	if configFile != "" {
 		c = config.InitConfigFromFile(configFile)
+	}
+
+	InitLoggerFromConfig(c, logCounter)
+	logger := steno.NewLogger("router.main")
+
+	err := dropsonde.Initialize(c.Logging.MetronAddress, c.Logging.JobName)
+	if err != nil {
+		logger.Errorf("Dropsonde failed to initialize: %s", err.Error())
+		os.Exit(1)
 	}
 
 	// setup number of procs
@@ -39,31 +56,44 @@ func main() {
 		runtime.GOMAXPROCS(c.GoMaxProcs)
 	}
 
-	logCounter := vcap.NewLogCounter()
-
-	InitLoggerFromConfig(c, logCounter)
-	logger := steno.NewLogger("router.main")
-
-	natsClient := yagnats.NewClient()
-	natsMembers := []yagnats.ConnectionProvider{}
-
-	for _, info := range c.Nats {
-		natsMembers = append(natsMembers, &yagnats.ConnectionInfo{
-			Addr:     fmt.Sprintf("%s:%d", info.Host, info.Port),
-			Username: info.User,
-			Password: info.Pass,
-		})
+	if c.DebugAddr != "" {
+		cf_debug_server.Run(c.DebugAddr)
 	}
 
-	err := natsClient.Connect(&yagnats.ConnectionCluster{
-		Members: natsMembers,
-	})
+	natsServers := c.NatsServers()
+	var natsClient yagnats.NATSConn
+	attempts := 3
+	for attempts > 0 {
+		natsClient, err = yagnats.Connect(natsServers)
+		if err == nil {
+			break
+		} else {
+			attempts--
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 
 	if err != nil {
-		logger.Fatalf("Error connecting to NATS: %s\n", err)
+		logger.Errorf("Error connecting to NATS: %s\n", err)
+		os.Exit(1)
 	}
 
+	natsClient.AddClosedCB(func(conn *nats.Conn) {
+		logger.Errorf("Close on NATS client. nats.Conn: %+v", *conn)
+		os.Exit(1)
+	})
+
 	registry := rregistry.NewRouteRegistry(c, natsClient)
+
+	if c.RoutingApiEnabled() {
+		logger.Info("Setting up routing_api route fetcher")
+		tokenFetcher := token_fetcher.NewTokenFetcher(&c.OAuth)
+		routingApiUri := fmt.Sprintf("%s:%d", c.RoutingApi.Uri, c.RoutingApi.Port)
+		routingApiClient := routing_api.NewClient(routingApiUri)
+		routeFetcher := route_fetcher.NewRouteFetcher(steno.NewLogger("router.route_fetcher"), tokenFetcher, registry, c, routingApiClient, 1)
+		routeFetcher.StartFetchCycle()
+		routeFetcher.StartEventCycle()
+	}
 
 	varz := rvarz.NewVarz(registry)
 
@@ -79,6 +109,7 @@ func main() {
 		Registry:        registry,
 		Reporter:        varz,
 		AccessLogger:    accessLogger,
+		SecureCookies:   c.SecureCookies,
 	}
 	p := proxy.NewProxy(args)
 

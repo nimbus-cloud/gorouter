@@ -1,12 +1,30 @@
 package test_util
 
 import (
-	"github.com/nimbus-cloud/gorouter/config"
+	"path/filepath"
+
+	"github.com/cloudfoundry-incubator/uaa-token-fetcher"
+	"github.com/cloudfoundry/gorouter/config"
 
 	"time"
 )
 
 func SpecConfig(natsPort, statusPort, proxyPort uint16) *config.Config {
+	return generateConfig(natsPort, statusPort, proxyPort)
+}
+
+func SpecSSLConfig(natsPort, statusPort, proxyPort, SSLPort uint16) *config.Config {
+	c := generateConfig(natsPort, statusPort, proxyPort)
+
+	c.EnableSSL = true
+	c.SSLKeyPath = filepath.Join("test", "assets", "private.pem")
+	c.SSLCertPath = filepath.Join("test", "assets", "public.pem")
+	c.SSLPort = SSLPort
+
+	return c
+}
+
+func generateConfig(natsPort, statusPort, proxyPort uint16) *config.Config {
 	c := config.DefaultConfig()
 
 	c.Port = proxyPort
@@ -21,6 +39,7 @@ func SpecConfig(natsPort, statusPort, proxyPort uint16) *config.Config {
 	c.PruneStaleDropletsInterval = 0
 	c.DropletStaleThreshold = 0
 	c.PublishActiveAppsInterval = 0
+	c.Zone = "z1"
 
 	c.EndpointTimeout = 500 * time.Millisecond
 
@@ -40,8 +59,15 @@ func SpecConfig(natsPort, statusPort, proxyPort uint16) *config.Config {
 	}
 
 	c.Logging = config.LoggingConfig{
-		File:  "/dev/stdout",
-		Level: "info",
+		File:          "/dev/stdout",
+		Level:         "info",
+		MetronAddress: "localhost:3457",
+		JobName:       "router_test_z1_0",
+	}
+
+	c.OAuth = token_fetcher.OAuthConfig{
+		TokenEndpoint: "http://localhost",
+		Port:          8080,
 	}
 
 	return c

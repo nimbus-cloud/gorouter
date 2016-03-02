@@ -13,17 +13,28 @@ import (
 	"github.com/nimbus-cloud/gorouter/route"
 )
 
+type RegistryInterface interface {
+	Register(uri route.Uri, endpoint *route.Endpoint)
+	Unregister(uri route.Uri, endpoint *route.Endpoint)
+	Lookup(uri route.Uri) *route.Pool
+	StartPruningCycle()
+	StopPruningCycle()
+	NumUris() int
+	NumEndpoints() int
+	MarshalJSON() ([]byte, error)
+}
+
 type RouteRegistry struct {
 	sync.RWMutex
 
 	logger *steno.Logger
 
-	byUri map[route.Uri]*route.Pool
+	byUri *Trie
 
 	pruneStaleDropletsInterval time.Duration
 	dropletStaleThreshold      time.Duration
 
-	messageBus yagnats.NATSClient
+	messageBus yagnats.NATSConn
 
 	ticker           *time.Ticker
 	timeOfLastUpdate time.Time
@@ -31,12 +42,12 @@ type RouteRegistry struct {
 	preferredNetwork *net.IPNet
 }
 
-func NewRouteRegistry(c *config.Config, mbus yagnats.NATSClient) *RouteRegistry {
+func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn) *RouteRegistry {
 	r := &RouteRegistry{}
 
 	r.logger = steno.NewLogger("router.registry")
 
-	r.byUri = make(map[route.Uri]*route.Pool)
+	r.byUri = NewTrie()
 
 	r.pruneStaleDropletsInterval = c.PruneStaleDropletsInterval
 	r.dropletStaleThreshold = c.DropletStaleThreshold
@@ -54,10 +65,10 @@ func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 
 	uri = uri.ToLower()
 
-	pool, found := r.byUri[uri]
+	pool, found := r.byUri.Find(uri)
 	if !found {
 		pool = route.NewPool(r.dropletStaleThreshold / 4, r.preferredNetwork)
-		r.byUri[uri] = pool
+		r.byUri.Insert(uri, pool)
 	}
 
 	pool.Put(endpoint)
@@ -71,12 +82,12 @@ func (r *RouteRegistry) Unregister(uri route.Uri, endpoint *route.Endpoint) {
 
 	uri = uri.ToLower()
 
-	pool, found := r.byUri[uri]
+	pool, found := r.byUri.Find(uri)
 	if found {
 		pool.Remove(endpoint)
 
 		if pool.IsEmpty() {
-			delete(r.byUri, uri)
+			r.byUri.Delete(uri)
 		}
 	}
 
@@ -87,7 +98,12 @@ func (r *RouteRegistry) Lookup(uri route.Uri) *route.Pool {
 	r.RLock()
 
 	uri = uri.ToLower()
-	pool := r.byUri[uri]
+	var err error
+	pool, found := r.byUri.MatchUri(uri)
+	for !found && err == nil {
+		uri, err = uri.NextWildcard()
+		pool, found = r.byUri.MatchUri(uri)
+	}
 
 	r.RUnlock()
 
@@ -105,14 +121,7 @@ func (r *RouteRegistry) StartPruningCycle() {
 				select {
 				case <-r.ticker.C:
 					r.logger.Debug("Start to check and prune stale droplets")
-					if r.isStateStale() {
-						r.logger.Info("State is stale; NOT pruning")
-						r.pauseStaleTracker()
-						break
-					}
-
 					r.pruneStaleDroplets()
-
 				}
 			}
 		}()
@@ -129,7 +138,7 @@ func (r *RouteRegistry) StopPruningCycle() {
 
 func (registry *RouteRegistry) NumUris() int {
 	registry.RLock()
-	uriCount := len(registry.byUri)
+	uriCount := registry.byUri.PoolCount()
 	registry.RUnlock()
 
 	return uriCount
@@ -145,48 +154,24 @@ func (r *RouteRegistry) TimeOfLastUpdate() time.Time {
 
 func (r *RouteRegistry) NumEndpoints() int {
 	r.RLock()
-	uris := make(map[string]struct{})
-	f := func(endpoint *route.Endpoint) {
-		uris[endpoint.CanonicalAddr()] = struct{}{}
-	}
-	for _, pool := range r.byUri {
-		pool.Each(f)
-	}
+	count := r.byUri.EndpointCount()
 	r.RUnlock()
 
-	return len(uris)
+	return count
 }
 
 func (r *RouteRegistry) MarshalJSON() ([]byte, error) {
 	r.RLock()
 	defer r.RUnlock()
 
-	return json.Marshal(r.byUri)
-}
-
-func (r *RouteRegistry) isStateStale() bool {
-	return !r.messageBus.Ping()
+	return json.Marshal(r.byUri.ToMap())
 }
 
 func (r *RouteRegistry) pruneStaleDroplets() {
 	r.Lock()
-	pruneTime := time.Now().Add(-r.dropletStaleThreshold)
-	for k, pool := range r.byUri {
-		pool.PruneBefore(pruneTime)
-		if pool.IsEmpty() {
-			delete(r.byUri, k)
-		}
-	}
-	r.Unlock()
-}
-
-func (r *RouteRegistry) pauseStaleTracker() {
-	r.Lock()
-	t := time.Now()
-
-	for _, pool := range r.byUri {
-		pool.MarkUpdated(t)
-	}
-
+	r.byUri.EachNodeWithPool(func(t *Trie) {
+		t.Pool.PruneEndpoints(r.dropletStaleThreshold)
+		t.Snip()
+	})
 	r.Unlock()
 }

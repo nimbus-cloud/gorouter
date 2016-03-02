@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"runtime"
 	"time"
-	. "github.com/nimbus-cloud/gorouter/common/http"
+
+	"github.com/apcera/nats"
+	. "github.com/cloudfoundry/gorouter/common/http"
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
+	"github.com/pivotal-golang/localip"
 )
 
 var procStat *ProcessStatus
@@ -41,6 +44,7 @@ type RouterStart struct {
 	Id                               string   `json:"id"`
 	Hosts                            []string `json:"hosts"`
 	MinimumRegisterIntervalInSeconds int      `json:"minimumRegisterIntervalInSeconds"`
+	PruneThresholdInSeconds          int      `json:"pruneThresholdInSeconds"`
 }
 
 func (c *VcapComponent) UpdateVarz() {
@@ -69,13 +73,13 @@ func (c *VcapComponent) Start() error {
 	c.UUID = fmt.Sprintf("%d-%s", c.Index, uuid)
 
 	if c.Host == "" {
-		host, err := LocalIP()
+		host, err := localip.LocalIP()
 		if err != nil {
 			log.Error(err.Error())
 			return err
 		}
 
-		port, err := GrabEphemeralPort()
+		port, err := localip.LocalPort()
 		if err != nil {
 			log.Error(err.Error())
 			return err
@@ -110,8 +114,8 @@ func (c *VcapComponent) Start() error {
 	return nil
 }
 
-func (c *VcapComponent) Register(mbusClient yagnats.NATSClient) error {
-	mbusClient.Subscribe("vcap.component.discover", func(msg *yagnats.Message) {
+func (c *VcapComponent) Register(mbusClient yagnats.NATSConn) error {
+	mbusClient.Subscribe("vcap.component.discover", func(msg *nats.Msg) {
 		c.Uptime = c.StartTime.Elapsed()
 		b, e := json.Marshal(c)
 		if e != nil {
@@ -119,7 +123,7 @@ func (c *VcapComponent) Register(mbusClient yagnats.NATSClient) error {
 			return
 		}
 
-		mbusClient.Publish(msg.ReplyTo, b)
+		mbusClient.Publish(msg.Reply, b)
 	})
 
 	b, e := json.Marshal(c)
@@ -164,13 +168,14 @@ func (c *VcapComponent) ListenAndServe() {
 	})
 
 	for path, marshaler := range c.InfoRoutes {
+		m := marshaler
 		hs.HandleFunc(path, func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Connection", "close")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 
 			enc := json.NewEncoder(w)
-			enc.Encode(marshaler)
+			enc.Encode(m)
 		})
 	}
 

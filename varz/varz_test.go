@@ -20,7 +20,7 @@ var _ = Describe("Varz", func() {
 	var Registry *registry.RouteRegistry
 
 	BeforeEach(func() {
-		Registry = registry.NewRouteRegistry(config.DefaultConfig(), fakeyagnats.New())
+		Registry = registry.NewRouteRegistry(config.DefaultConfig(), fakeyagnats.Connect())
 		Varz = NewVarz(Registry)
 	})
 
@@ -72,7 +72,7 @@ var _ = Describe("Varz", func() {
 	It("has urls", func() {
 		Ω(findValue(Varz, "urls")).To(Equal(float64(0)))
 
-		var fooReg = route.NewEndpoint("12345", "192.168.1.1", 1234, "", map[string]string{})
+		var fooReg = route.NewEndpoint("12345", "192.168.1.1", 1234, "", map[string]string{}, -1)
 
 		// Add a route
 		Registry.Register("foo.vcap.me", fooReg)

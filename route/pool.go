@@ -8,6 +8,8 @@ import (
 	"net"
 )
 
+var random = rand.New(rand.NewSource(time.Now().UnixNano()))
+
 type EndpointIterator interface {
 	Next() *Endpoint
 	EndpointFailed()
@@ -95,6 +97,31 @@ func (p *Pool) Put(endpoint *Endpoint) bool {
 	return !found
 }
 
+func (p *Pool) PruneEndpoints(defaultThreshold time.Duration) {
+	p.lock.Lock()
+
+	last := len(p.endpoints)
+	now := time.Now()
+
+	for i := 0; i < last; {
+		e := p.endpoints[i]
+
+		staleTime := now.Add(-defaultThreshold)
+		if e.endpoint.staleThreshold > 0 && e.endpoint.staleThreshold < defaultThreshold {
+			staleTime = now.Add(-e.endpoint.staleThreshold)
+		}
+
+		if e.updated.Before(staleTime) {
+			p.removeEndpoint(e)
+			last--
+		} else {
+			i++
+		}
+	}
+
+	p.lock.Unlock()
+}
+
 func (p *Pool) Remove(endpoint *Endpoint) bool {
 	var e *endpointElem
 
@@ -159,10 +186,10 @@ func (p *Pool) next() *Endpoint {
 		return nil
 	}
 
-	if *nextIdx == -1 {
-		*nextIdx = rand.Intn(last)
-	} else if *nextIdx >= last {
-		*nextIdx = 0
+	if p.nextIdx == -1 {
+		p.nextIdx = random.Intn(last)
+	} else if p.nextIdx >= last {
+		p.nextIdx = 0
 	}
 
 	startIdx := *nextIdx
@@ -215,23 +242,6 @@ func (p *Pool) IsEmpty() bool {
 	p.lock.Unlock()
 
 	return l == 0
-}
-
-func (p *Pool) PruneBefore(t time.Time) {
-	p.lock.Lock()
-
-	last := len(p.endpoints)
-	for i := 0; i < last; {
-		e := p.endpoints[i]
-		if e.updated.Before(t) {
-			p.removeEndpoint(e)
-			last--
-		} else {
-			i++
-		}
-	}
-
-	p.lock.Unlock()
 }
 
 func (p *Pool) MarkUpdated(t time.Time) {

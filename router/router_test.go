@@ -1,16 +1,19 @@
 package router_test
 
 import (
-	"github.com/nimbus-cloud/gorouter/access_log"
-	vcap "github.com/nimbus-cloud/gorouter/common"
-	cfg "github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/proxy"
-	rregistry "github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/route"
-	. "github.com/nimbus-cloud/gorouter/router"
-	"github.com/nimbus-cloud/gorouter/test"
-	"github.com/nimbus-cloud/gorouter/test_util"
-	vvarz "github.com/nimbus-cloud/gorouter/varz"
+	"github.com/apcera/nats"
+	"github.com/cloudfoundry/dropsonde"
+	"github.com/cloudfoundry/dropsonde/emitter/fake"
+	"github.com/cloudfoundry/gorouter/access_log"
+	vcap "github.com/cloudfoundry/gorouter/common"
+	cfg "github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/proxy"
+	rregistry "github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/route"
+	. "github.com/cloudfoundry/gorouter/router"
+	"github.com/cloudfoundry/gorouter/test"
+	"github.com/cloudfoundry/gorouter/test_util"
+	vvarz "github.com/cloudfoundry/gorouter/varz"
 	"github.com/cloudfoundry/gunk/natsrunner"
 	"github.com/cloudfoundry/yagnats"
 	. "github.com/onsi/ginkgo"
@@ -18,11 +21,13 @@ import (
 
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"time"
 )
@@ -30,24 +35,35 @@ import (
 var _ = Describe("Router", func() {
 
 	var natsRunner *natsrunner.NATSRunner
+	var natsPort uint16
 	var config *cfg.Config
 
-	var mbusClient *yagnats.Client
+	var mbusClient yagnats.NATSConn
 	var registry *rregistry.RouteRegistry
 	var varz vvarz.Varz
 	var router *Router
 
 	BeforeEach(func() {
-		natsPort := test_util.NextAvailPort()
+		natsPort = test_util.NextAvailPort()
 		natsRunner = natsrunner.NewNATSRunner(int(natsPort))
 		natsRunner.Start()
+
+		fakeEmitter := fake.NewFakeEventEmitter("fake")
+		dropsonde.InitializeWithEmitter(fakeEmitter)
 
 		proxyPort := test_util.NextAvailPort()
 		statusPort := test_util.NextAvailPort()
 
-		config = test_util.SpecConfig(natsPort, statusPort, proxyPort)
+		cert, err := tls.LoadX509KeyPair("../test/assets/public.pem", "../test/assets/private.pem")
+		Expect(err).ToNot(HaveOccurred())
 
-		mbusClient = natsRunner.MessageBus.(*yagnats.Client)
+		config = test_util.SpecConfig(natsPort, statusPort, proxyPort)
+		config.EnableSSL = true
+		config.SSLPort = 4443
+		config.SSLCertificate = cert
+		config.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_256_CBC_SHA}
+
+		mbusClient = natsRunner.MessageBus
 		registry = rregistry.NewRouteRegistry(config, mbusClient)
 		varz = vvarz.NewVarz(registry)
 		logcounter := vcap.NewLogCounter()
@@ -60,9 +76,16 @@ var _ = Describe("Router", func() {
 			AccessLogger:    &access_log.NullAccessLogger{},
 		})
 		r, err := NewRouter(config, proxy, mbusClient, registry, varz, logcounter)
+
 		Ω(err).ShouldNot(HaveOccurred())
 		router = r
-		r.Run()
+		errChan := r.Run()
+		time.Sleep(50 * time.Millisecond)
+		go func() {
+			select {
+			case <-errChan:
+			}
+		}()
 	})
 
 
@@ -80,15 +103,21 @@ var _ = Describe("Router", func() {
 		It("RouterGreets", func() {
 			response := make(chan []byte)
 
-			mbusClient.Subscribe("router.greet.test.response", func(msg *yagnats.Message) {
-				response <- msg.Payload
+			mbusClient.Subscribe("router.greet.test.response", func(msg *nats.Msg) {
+				response <- msg.Data
 			})
 
-			mbusClient.PublishWithReplyTo("router.greet", "router.greet.test.response", []byte{})
+			mbusClient.PublishRequest("router.greet", "router.greet.test.response", []byte{})
 
 			var msg []byte
 			Eventually(response, 1).Should(Receive(&msg))
-			Ω(string(msg)).To(MatchRegexp(".*\"minimumRegisterIntervalInSeconds\":5.*"))
+
+			var message vcap.RouterStart
+			err := json.Unmarshal(msg, &message)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(message.MinimumRegisterIntervalInSeconds).To(Equal(5))
+			Expect(message.PruneThresholdInSeconds).To(Equal(120))
 		})
 
 		It("discovers", func() {
@@ -99,13 +128,13 @@ var _ = Describe("Router", func() {
 			// sure that router has run at least for one second
 			time.Sleep(time.Second)
 
-			mbusClient.Subscribe("vcap.component.discover.test.response", func(msg *yagnats.Message) {
+			mbusClient.Subscribe("vcap.component.discover.test.response", func(msg *nats.Msg) {
 				var component vcap.VcapComponent
-				_ = json.Unmarshal(msg.Payload, &component)
+				_ = json.Unmarshal(msg.Data, &component)
 				sig <- component
 			})
 
-			mbusClient.PublishWithReplyTo(
+			mbusClient.PublishRequest(
 				"vcap.component.discover",
 				"vcap.component.discover.test.response",
 				[]byte{},
@@ -141,15 +170,21 @@ var _ = Describe("Router", func() {
 
 		It("sends start on a nats connect", func() {
 			started := make(chan bool)
+			cb := make(chan bool)
 
-			mbusClient.Subscribe("router.start", func(*yagnats.Message) {
+			mbusClient.Subscribe("router.start", func(*nats.Msg) {
 				started <- true
+			})
+
+			mbusClient.AddReconnectedCB(func(_ *nats.Conn) {
+				cb <- true
 			})
 
 			natsRunner.Stop()
 			natsRunner.Start()
 
-			Eventually(started, 1).Should(Receive())
+			Eventually(started, 4).Should(Receive())
+			Eventually(cb, 4).Should(Receive())
 		})
 	})
 
@@ -229,7 +264,7 @@ var _ = Describe("Router", func() {
 	})
 
 	Context("Stop", func() {
-		It("no longer responds to component requests", func() {
+		It("no longer proxies http", func() {
 			app := test.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil)
 
 			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +291,7 @@ var _ = Describe("Router", func() {
 			Ω(err).Should(HaveOccurred())
 		})
 
-		It("no longer proxies", func() {
+		It("no longer responds to component requests", func() {
 			host := fmt.Sprintf("http://%s:%d/routes", config.Ip, config.Status.Port)
 
 			req, err := http.NewRequest("GET", host, nil)
@@ -271,6 +306,42 @@ var _ = Describe("Router", func() {
 			req, err = http.NewRequest("GET", host, nil)
 
 			_, err = http.DefaultClient.Do(req)
+			Ω(err).Should(HaveOccurred())
+		})
+
+		It("no longer proxies https", func() {
+			app := test.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil)
+
+			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
+				_, err := ioutil.ReadAll(r.Body)
+				defer r.Body.Close()
+				Ω(err).ShouldNot(HaveOccurred())
+				w.WriteHeader(http.StatusNoContent)
+			})
+			app.Listen()
+			Ω(waitAppRegistered(registry, app, time.Second*5)).To(BeTrue())
+
+			host := fmt.Sprintf("https://greet.vcap.me:%d/", config.SSLPort)
+
+			req, err := http.NewRequest("GET", host, nil)
+			Ω(err).ShouldNot(HaveOccurred())
+			req.SetBasicAuth("user", "pass")
+
+			tr := &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			}
+			client := http.Client{Transport: tr}
+			resp, err := client.Do(req)
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(resp).ShouldNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusNoContent))
+
+			router.Stop()
+			router = nil
+
+			req, err = http.NewRequest("GET", host, nil)
+			_, err = client.Do(req)
 			Ω(err).Should(HaveOccurred())
 		})
 	})
@@ -375,6 +446,111 @@ var _ = Describe("Router", func() {
 		Ω(string(body)).Should(MatchRegexp(".*1\\.2\\.3\\.4:1234.*\n"))
 	})
 
+	Context("HTTP keep-alive", func() {
+		It("reuses the same connection on subsequent calls", func() {
+			app := test.NewGreetApp([]route.Uri{"keepalive.vcap.me"}, config.Port, mbusClient, nil)
+			app.Listen()
+			host := fmt.Sprintf("keepalive.vcap.me:%d", config.Port)
+			uri := fmt.Sprintf("http://%s", host)
+
+			conn, err := net.Dial("tcp", host)
+			Ω(err).ShouldNot(HaveOccurred())
+
+			client := httputil.NewClientConn(conn, nil)
+			req, _ := http.NewRequest("GET", uri, nil)
+			Ω(req.Close).To(BeFalse())
+
+			resp, err := client.Do(req)
+			Ω(err).ToNot(HaveOccurred())
+			Ω(resp).ToNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+
+			//make second request without errors
+			resp, err = client.Do(req)
+			Ω(err).ToNot(HaveOccurred())
+			Ω(resp).ToNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+		})
+
+		It("resets the idle timeout on activity", func() {
+			app := test.NewGreetApp([]route.Uri{"keepalive.vcap.me"}, config.Port, mbusClient, nil)
+			app.Listen()
+			host := fmt.Sprintf("keepalive.vcap.me:%d", config.Port)
+			uri := fmt.Sprintf("http://%s", host)
+
+			conn, err := net.Dial("tcp", host)
+			Ω(err).ShouldNot(HaveOccurred())
+
+			client := httputil.NewClientConn(conn, nil)
+			req, _ := http.NewRequest("GET", uri, nil)
+			Ω(req.Close).To(BeFalse())
+
+			// initiate idle timeout
+			assertServerResponse(client, req)
+
+			// use 3/4 of the idle timeout
+			time.Sleep(config.EndpointTimeout / 4 * 3)
+
+			//make second request without errors
+			resp, err := client.Do(req)
+			Ω(err).ToNot(HaveOccurred())
+			Ω(resp).ToNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+
+			// use another 3/4 of the idle timeout, exceeding the original timeout
+			time.Sleep(config.EndpointTimeout / 4 * 3)
+
+			// make third request without errors
+			// even though initial idle timeout was exceeded because
+			// it will have been reset
+			resp, err = client.Do(req)
+			Ω(err).ToNot(HaveOccurred())
+			Ω(resp).ToNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+		})
+
+		It("removes the idle timeout during an active connection", func() {
+			// create an app that takes 3/4 of the deadline to respond
+			// during an active connection
+			app := test.NewSlowApp(
+				[]route.Uri{"keepalive.vcap.me"},
+				config.Port,
+				mbusClient,
+				config.EndpointTimeout/4*3,
+			)
+			app.Listen()
+			host := fmt.Sprintf("keepalive.vcap.me:%d", config.Port)
+			uri := fmt.Sprintf("http://%s", host)
+
+			conn, err := net.Dial("tcp", host)
+			Ω(err).ShouldNot(HaveOccurred())
+
+			client := httputil.NewClientConn(conn, nil)
+			req, _ := http.NewRequest("GET", uri, nil)
+			Ω(req.Close).To(BeFalse())
+
+			// initiate idle timeout
+			assertServerResponse(client, req)
+
+			// use 3/4 of the idle timeout
+			time.Sleep(config.EndpointTimeout / 4 * 3)
+
+			// because 3/4 of the idle timeout is now used
+			// making a request that will last 3/4 of the timeout
+			// that does not disconnect will show that the idle timeout
+			// was removed during the active connection
+			resp, err := client.Do(req)
+			Ω(err).ToNot(HaveOccurred())
+			Ω(resp).ToNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+		})
+	})
+
 	Context("long requests", func() {
 		Context("http", func() {
 			BeforeEach(func() {
@@ -432,7 +608,7 @@ var _ = Describe("Router", func() {
 
 			x := test_util.NewHttpConn(conn)
 
-			req := x.NewRequest("GET", "/chat", nil)
+			req := test_util.NewRequest("GET", "/chat", nil)
 			req.Host = "ws-app.vcap.me"
 			req.Header.Set("Upgrade", "websocket")
 			req.Header.Set("Connection", "upgrade")
@@ -446,6 +622,42 @@ var _ = Describe("Router", func() {
 			x.CheckLine("hello from server")
 
 			x.Close()
+		})
+	})
+
+	Context("serving https", func() {
+		It("serves ssl traffic", func() {
+			app := test.NewGreetApp([]route.Uri{"test.vcap.me"}, config.Port, mbusClient, nil)
+			app.Listen()
+
+			uri := fmt.Sprintf("https://test.vcap.me:%d", config.SSLPort)
+			req, _ := http.NewRequest("GET", uri, nil)
+			tr := &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			}
+			client := http.Client{Transport: tr}
+			resp, err := client.Do(req)
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(resp).ShouldNot(BeNil())
+			resp.Body.Close()
+			Ω(resp.StatusCode).To(Equal(http.StatusOK))
+		})
+
+		It("fails when the client uses an unsupported cipher suite", func() {
+			app := test.NewGreetApp([]route.Uri{"test.vcap.me"}, config.Port, mbusClient, nil)
+			app.Listen()
+
+			uri := fmt.Sprintf("https://test.vcap.me:%d", config.SSLPort)
+			req, _ := http.NewRequest("GET", uri, nil)
+			tr := &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+					CipherSuites:       []uint16{tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA},
+				},
+			}
+			client := http.Client{Transport: tr}
+			_, err := client.Do(req)
+			Ω(err).To(HaveOccurred())
 		})
 	})
 })
@@ -589,4 +801,23 @@ func getAppPortWithSticky(url string, rPort uint16, sessionCookie, vcapCookie *h
 	port, err = ioutil.ReadAll(resp.Body)
 
 	return string(port)
+}
+
+func assertServerResponse(client *httputil.ClientConn, req *http.Request) {
+	var resp *http.Response
+	var err error
+
+	for i := 0; i < 3; i++ {
+		resp, err = client.Do(req)
+		Ω(err).ToNot(HaveOccurred())
+		Ω(resp).ToNot(BeNil())
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	Ω(resp.StatusCode).To(Equal(http.StatusOK))
 }

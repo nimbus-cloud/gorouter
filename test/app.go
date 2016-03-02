@@ -1,8 +1,8 @@
 package test
 
 import (
-	"github.com/nimbus-cloud/gorouter/common"
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/gorouter/common"
+	"github.com/cloudfoundry/gorouter/route"
 	"github.com/cloudfoundry/yagnats"
 	. "github.com/onsi/gomega"
 	"github.com/pivotal-golang/localip"

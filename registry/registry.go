@@ -9,8 +9,8 @@ import (
 	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
 
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/route"
 )
 
 type RegistryInterface interface {

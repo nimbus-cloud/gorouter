@@ -1,9 +1,9 @@
 package access_log_test
 
 import (
-	. "github.com/nimbus-cloud/gorouter/access_log"
+	. "github.com/cloudfoundry/gorouter/access_log"
 
-	"github.com/nimbus-cloud/gorouter/config"
+	"github.com/cloudfoundry/gorouter/config"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )

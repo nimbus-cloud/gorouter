@@ -1,10 +1,10 @@
 package varz_test
 
 import (
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/route"
-	. "github.com/nimbus-cloud/gorouter/varz"
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/route"
+	. "github.com/cloudfoundry/gorouter/varz"
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"

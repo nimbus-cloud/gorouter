@@ -2,7 +2,7 @@ package common_test
 
 import (
 	"encoding/json"
-	. "github.com/nimbus-cloud/gorouter/common"
+	. "github.com/cloudfoundry/gorouter/common"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 

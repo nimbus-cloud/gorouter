@@ -1,8 +1,8 @@
 package router_test
 
 import (
-	"github.com/nimbus-cloud/gorouter/registry"
-	"github.com/nimbus-cloud/gorouter/test"
+	"github.com/cloudfoundry/gorouter/registry"
+	"github.com/cloudfoundry/gorouter/test"
 
 	"net"
 	"time"

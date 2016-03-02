@@ -1,12 +1,12 @@
 package registry_test
 
 import (
-	. "github.com/nimbus-cloud/gorouter/registry"
+	. "github.com/cloudfoundry/gorouter/registry"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"github.com/nimbus-cloud/gorouter/config"
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/route"
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
 
 	"encoding/json"

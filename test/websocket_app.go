@@ -8,8 +8,8 @@ import (
 
 	. "github.com/onsi/gomega"
 
-	"github.com/nimbus-cloud/gorouter/route"
-	"github.com/nimbus-cloud/gorouter/test_util"
+	"github.com/cloudfoundry/gorouter/route"
+	"github.com/cloudfoundry/gorouter/test_util"
 	"github.com/cloudfoundry/yagnats"
 )
 

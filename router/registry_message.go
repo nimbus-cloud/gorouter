@@ -1,7 +1,7 @@
 package router
 
 import (
-	"github.com/nimbus-cloud/gorouter/route"
+	"github.com/cloudfoundry/gorouter/route"
 )
 
 type registryMessage struct {

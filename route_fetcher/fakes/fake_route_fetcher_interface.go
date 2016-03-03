@@ -4,7 +4,7 @@ package fakes
 import (
 	"sync"
 
-	"github.com/cloudfoundry/gorouter/route_fetcher"
+	//"github.com/cloudfoundry/gorouter/route_fetcher"
 )
 
 type FakeRouteFetcherInterface struct {
@@ -40,4 +40,4 @@ func (fake *FakeRouteFetcherInterface) FetchRoutesReturns(result1 error) {
 	}{result1}
 }
 
-var _ route_fetcher.RouteFetcherInterface = new(FakeRouteFetcherInterface)
+//var _ route_fetcher.RouteFetcherInterface = new(FakeRouteFetcherInterface)

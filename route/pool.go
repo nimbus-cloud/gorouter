@@ -78,12 +78,12 @@ func (p *Pool) Put(endpoint *Endpoint) bool {
 			index:    len(p.endpoints),
 			preferred_index: -1,
 		}
- 
+
 		p.endpoints = append(p.endpoints, e)
 		
 		if p.preferred_network != nil  {
 			if p.preferred_network.Contains(net.ParseIP(endpoint.Host)) {
-			    e.preferred_index = len(p.preferred_endpoints)
+			    	e.preferred_index = len(p.preferred_endpoints)
 				p.preferred_endpoints = append(p.preferred_endpoints, e)
 			}
 		}
@@ -173,15 +173,13 @@ func (p *Pool) next() *Endpoint {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	endpoints := p.endpoints
-	nextIdx := &p.nextIdx
-	
 	if len(p.preferred_endpoints) != 0 {
-		endpoints = p.preferred_endpoints
-		nextIdx = &p.nextPreferredIdx
+		p.endpoints = p.preferred_endpoints
+		// do not overwrite nextIdx on every call to next()
+		//p.nextIdx = p.nextPreferredIdx
 	}
 
-	last := len(endpoints)
+	last := len(p.endpoints)
 	if last == 0 {
 		return nil
 	}
@@ -192,10 +190,10 @@ func (p *Pool) next() *Endpoint {
 		p.nextIdx = 0
 	}
 
-	startIdx := *nextIdx
+	startIdx := p.nextIdx
 	curIdx := startIdx
 	for {
-		e := endpoints[curIdx]
+		e := p.endpoints[curIdx]
 
 		curIdx++
 		if curIdx == last {
@@ -211,7 +209,7 @@ func (p *Pool) next() *Endpoint {
 		}
 
 		if e.failedAt == nil {
-			*nextIdx = curIdx
+			p.nextIdx = curIdx
 			return e.endpoint
 		}
 

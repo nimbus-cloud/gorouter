@@ -3,6 +3,7 @@ package route_test
 import (
 	"fmt"
 	"time"
+	"net"
 
 	. "github.com/cloudfoundry/gorouter/route"
 	. "github.com/onsi/ginkgo"
@@ -206,20 +207,21 @@ var _ = Describe("Pool", func() {
 	Context("PreferredNetwork", func() {
 		It("returns only ips from a preferred network", func() {
 			_, testnet, _ := net.ParseCIDR("10.1.1.0/24")
-			
-			e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil)
-			e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil)
-			e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil)
-			
+
+			e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil, -1)
+			e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil, -1)
+			e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil, -1)
+
 			pool = NewPool(2 * time.Minute, testnet)
 			pool.Put(e1)
 			pool.Put(e2)
                         pool.Put(e3)
-			pool.Put(NewEndpoint("", "10.1.2.5", 5678, "", nil))
-			pool.Put(NewEndpoint("", "10.1.2.5", 1234, "", nil))
-			pool.Put(NewEndpoint("", "10.1.2.6", 1234, "", nil))
-			pool.Remove(e3) 
-			
+
+			pool.Put(NewEndpoint("", "10.1.2.5", 5678, "", nil, -1))
+			pool.Put(NewEndpoint("", "10.1.2.5", 1234, "", nil, -1))
+			pool.Put(NewEndpoint("", "10.1.2.6", 1234, "", nil, -1))
+			pool.Remove(e3)
+
 			iter := pool.Endpoints("")
 			r1 := iter.Next()
 			r2 := iter.Next()
@@ -227,18 +229,22 @@ var _ = Describe("Pool", func() {
 
 			array := [] *Endpoint {e1, e2}
 
+			//fmt.Printf("\n")
+			//fmt.Printf("r1: %v\n", r1)
+			//fmt.Printf("r2: %v\n", r2)
+			//fmt.Printf("r3: %v\n", r3)
                         Ω(endPointInSlice(r1, array)).Should(Equal(true))
 			Ω(endPointInSlice(r2, array)).Should(Equal(true))
 			Ω(endPointInSlice(r3, array)).Should(Equal(true))
 
 		})
 
-                It("returns non preferred networks when preferred aren't available", func() {
+		It("returns non preferred networks when preferred aren't available", func() {
                         _, testnet, _ := net.ParseCIDR("10.1.2.0/24")
 
-                        e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil)
-                        e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil)
-                        e3 := NewEndpoint("", "10.1.2.3", 5678, "", nil)
+                        e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil, -1)
+                        e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil, -1)
+                        e3 := NewEndpoint("", "10.1.2.3", 5678, "", nil, -1)
 
                         pool = NewPool(2 * time.Minute, testnet)
                         pool.Put(e1)
@@ -257,14 +263,14 @@ var _ = Describe("Pool", func() {
                         Ω(endPointInSlice(r2, array)).Should(Equal(true))
                         Ω(endPointInSlice(r3, array)).Should(Equal(true))
 
-                })
+		})
 
 		It("handles all elements of a preferred network being removed", func() {
 			_, testnet, _ := net.ParseCIDR("10.1.1.0/24")
 
-			e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil)
-			e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil)
-			e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil)
+			e1 := NewEndpoint("", "10.1.1.1", 5678, "", nil, -1)
+			e2 := NewEndpoint("", "10.1.1.2", 5678, "", nil, -1)
+			e3 := NewEndpoint("", "10.1.1.3", 5678, "", nil, -1)
 
 			pool = NewPool(2 * time.Minute, testnet)
 			pool.Put(e1)

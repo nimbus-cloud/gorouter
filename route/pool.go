@@ -173,27 +173,29 @@ func (p *Pool) next() *Endpoint {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	endpoints := p.endpoints
+	nextIdx := &p.nextIdx
+
 	if len(p.preferred_endpoints) != 0 {
-		p.endpoints = p.preferred_endpoints
-		// do not overwrite nextIdx on every call to next()
-		//p.nextIdx = p.nextPreferredIdx
+		endpoints = p.preferred_endpoints
+		nextIdx = &p.nextPreferredIdx
 	}
 
-	last := len(p.endpoints)
+	last := len(endpoints)
 	if last == 0 {
 		return nil
 	}
 
-	if p.nextIdx == -1 {
-		p.nextIdx = random.Intn(last)
-	} else if p.nextIdx >= last {
-		p.nextIdx = 0
+	if *nextIdx == -1 {
+		*nextIdx = random.Intn(last)
+	} else if *nextIdx >= last {
+		*nextIdx = 0
 	}
 
-	startIdx := p.nextIdx
+	startIdx := *nextIdx
 	curIdx := startIdx
 	for {
-		e := p.endpoints[curIdx]
+		e := endpoints[curIdx]
 
 		curIdx++
 		if curIdx == last {
@@ -209,7 +211,7 @@ func (p *Pool) next() *Endpoint {
 		}
 
 		if e.failedAt == nil {
-			p.nextIdx = curIdx
+			*nextIdx = curIdx
 			return e.endpoint
 		}
 

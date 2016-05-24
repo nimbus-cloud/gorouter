@@ -72,7 +72,7 @@ func (x *HttpConn) WriteResponse(resp *http.Response) {
 func (x *HttpConn) CheckLine(expected string) {
 	l, err := x.Reader.ReadString('\n')
 	Ω(err).NotTo(HaveOccurred())
-	Ω(strings.TrimRight(l, "\r\n")).To(Equal(expected))
+	Expect(strings.TrimRight(l, "\r\n")).To(Equal(expected))
 }
 
 func (x *HttpConn) CheckLines(expected []string) {
@@ -97,9 +97,11 @@ func (x *HttpConn) WriteLines(lines []string) {
 	x.WriteLine("")
 }
 
-func NewRequest(method, urlStr string, body io.Reader) *http.Request {
-	req, err := http.NewRequest(method, urlStr, body)
+func NewRequest(method, host, rawPath string, body io.Reader) *http.Request {
+	req, err := http.NewRequest(method, "http://"+host+rawPath, body)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	req.URL = &url.URL{Host: req.URL.Host, Opaque: urlStr}
+
+	req.URL = &url.URL{Scheme: "http", Host: host, Opaque: rawPath}
+	req.Host = host
 	return req
 }

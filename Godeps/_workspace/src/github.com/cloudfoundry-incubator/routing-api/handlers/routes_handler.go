@@ -3,16 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/cloudfoundry-incubator/routing-api/authentication"
 	"github.com/cloudfoundry-incubator/routing-api/db"
 	"github.com/pivotal-golang/lager"
-)
-
-const (
-	AdminRouteScope     = "route.admin"
-	AdvertiseRouteScope = "route.advertise"
 )
 
 type RoutesHandler struct {
@@ -36,14 +30,14 @@ func NewRoutesHandler(token authentication.Token, maxTTL int, validator RouteVal
 func (h *RoutesHandler) List(w http.ResponseWriter, req *http.Request) {
 	log := h.logger.Session("list-routes")
 
-	err := h.token.DecodeToken(req.Header.Get("Authorization"), AdminRouteScope)
+	err := h.token.DecodeToken(req.Header.Get("Authorization"), RoutingRoutesReadScope)
 	if err != nil {
 		handleUnauthorizedError(w, err, log)
 		return
 	}
 	routes, err := h.db.ReadRoutes()
 	if err != nil {
-		handleDBError(w, err, log)
+		handleDBCommunicationError(w, err, log)
 		return
 	}
 	encoder := json.NewEncoder(w)
@@ -63,7 +57,7 @@ func (h *RoutesHandler) Upsert(w http.ResponseWriter, req *http.Request) {
 
 	log.Info("request", lager.Data{"route_creation": routes})
 
-	err = h.token.DecodeToken(req.Header.Get("Authorization"), AdvertiseRouteScope, AdminRouteScope)
+	err = h.token.DecodeToken(req.Header.Get("Authorization"), RoutingRoutesWriteScope)
 	if err != nil {
 		handleUnauthorizedError(w, err, log)
 		return
@@ -78,7 +72,7 @@ func (h *RoutesHandler) Upsert(w http.ResponseWriter, req *http.Request) {
 	for _, route := range routes {
 		err = h.db.SaveRoute(route)
 		if err != nil {
-			handleDBError(w, err, log)
+			handleDBCommunicationError(w, err, log)
 			return
 		}
 	}
@@ -99,7 +93,7 @@ func (h *RoutesHandler) Delete(w http.ResponseWriter, req *http.Request) {
 
 	log.Info("request", lager.Data{"route_deletion": routes})
 
-	err = h.token.DecodeToken(req.Header.Get("Authorization"), AdvertiseRouteScope, AdminRouteScope)
+	err = h.token.DecodeToken(req.Header.Get("Authorization"), RoutingRoutesWriteScope)
 	if err != nil {
 		handleUnauthorizedError(w, err, log)
 		return
@@ -113,9 +107,11 @@ func (h *RoutesHandler) Delete(w http.ResponseWriter, req *http.Request) {
 
 	for _, route := range routes {
 		err = h.db.DeleteRoute(route)
-		if err != nil && !strings.Contains(err.Error(), "Key not found") {
-			handleDBError(w, err, log)
-			return
+		if err != nil {
+			if dberr, ok := err.(db.DBError); !ok || dberr.Type != db.KeyNotFound {
+				handleDBCommunicationError(w, err, log)
+				return
+			}
 		}
 	}
 

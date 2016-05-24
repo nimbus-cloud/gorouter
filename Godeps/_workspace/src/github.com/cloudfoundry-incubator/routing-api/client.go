@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudfoundry-incubator/cf_http"
 	"github.com/cloudfoundry-incubator/routing-api/db"
+	trace "github.com/cloudfoundry-incubator/trace-logger"
 	"github.com/tedsuo/rata"
 	"github.com/vito/go-sse/sse"
 )
@@ -19,6 +20,9 @@ type Client interface {
 	UpsertRoutes([]db.Route) error
 	Routes() ([]db.Route, error)
 	DeleteRoutes([]db.Route) error
+	RouterGroups() ([]db.RouterGroup, error)
+	UpsertTcpRouteMappings([]db.TcpRouteMapping) error
+	TcpRouteMappings() ([]db.TcpRouteMapping, error)
 
 	SubscribeToEvents() (EventSource, error)
 }
@@ -45,8 +49,7 @@ func (c *client) SetToken(token string) {
 }
 
 func (c *client) UpsertRoutes(routes []db.Route) error {
-	err := c.doRequest(UpsertRoute, nil, nil, routes, nil)
-	return err
+	return c.doRequest(UpsertRoute, nil, nil, routes, nil)
 }
 
 func (c *client) Routes() ([]db.Route, error) {
@@ -55,9 +58,24 @@ func (c *client) Routes() ([]db.Route, error) {
 	return routes, err
 }
 
+func (c *client) RouterGroups() ([]db.RouterGroup, error) {
+	var routerGroups []db.RouterGroup
+	err := c.doRequest(ListRouterGroups, nil, nil, nil, &routerGroups)
+	return routerGroups, err
+}
+
 func (c *client) DeleteRoutes(routes []db.Route) error {
-	err := c.doRequest(DeleteRoute, nil, nil, routes, nil)
-	return err
+	return c.doRequest(DeleteRoute, nil, nil, routes, nil)
+}
+
+func (c *client) UpsertTcpRouteMappings(tcpRouteMappings []db.TcpRouteMapping) error {
+	return c.doRequest(UpsertTcpRouteMapping, nil, nil, tcpRouteMappings, nil)
+}
+
+func (c *client) TcpRouteMappings() ([]db.TcpRouteMapping, error) {
+	var tcpRouteMappings []db.TcpRouteMapping
+	err := c.doRequest(ListTcpRouteMapping, nil, nil, nil, &tcpRouteMappings)
+	return tcpRouteMappings, err
 }
 
 func (c *client) SubscribeToEvents() (EventSource, error) {
@@ -68,6 +86,7 @@ func (c *client) SubscribeToEvents() (EventSource, error) {
 			panic(err) // totally shouldn't happen
 		}
 
+		trace.DumpRequest(request)
 		return request
 	})
 	if err != nil {
@@ -105,11 +124,15 @@ func (c *client) doRequest(requestName string, params rata.Params, queryParams u
 }
 
 func (c *client) do(req *http.Request, response interface{}) error {
+	trace.DumpRequest(req)
+
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
+
+	trace.DumpResponse(res)
 
 	if res.StatusCode > 299 {
 		errResponse := Error{}

@@ -1,6 +1,8 @@
 package main_test
 
 import (
+	"errors"
+
 	"github.com/cloudfoundry-incubator/candiedyaml"
 	"github.com/cloudfoundry/gorouter/config"
 	"github.com/cloudfoundry/gorouter/route"
@@ -39,7 +41,7 @@ var _ = Describe("Router Integration", func() {
 
 	writeConfig := func(config *config.Config, cfgFile string) {
 		cfgBytes, err := candiedyaml.Marshal(config)
-		Ω(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 		ioutil.WriteFile(cfgFile, cfgBytes, os.ModePerm)
 	}
 
@@ -75,7 +77,7 @@ var _ = Describe("Router Integration", func() {
 	startGorouterSession := func(cfgFile string) *Session {
 		gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
 		session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
-		Ω(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 		Eventually(session, 5).Should(Say("gorouter.started"))
 		gorouterSession = session
 
@@ -84,14 +86,14 @@ var _ = Describe("Router Integration", func() {
 
 	stopGorouter := func(gorouterSession *Session) {
 		err := gorouterSession.Command.Process.Signal(syscall.SIGTERM)
-		Ω(err).ShouldNot(HaveOccurred())
-		Expect(gorouterSession.Wait(5 * time.Second)).Should(Exit(0))
+		Expect(err).ToNot(HaveOccurred())
+		Eventually(gorouterSession, 5).Should(Exit(0))
 	}
 
 	BeforeEach(func() {
 		var err error
 		tmpdir, err = ioutil.TempDir("", "gorouter")
-		Ω(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		natsPort = test_util.NextAvailPort()
 		natsRunner = natsrunner.NewNATSRunner(int(natsPort))
@@ -120,7 +122,7 @@ var _ = Describe("Router Integration", func() {
 		BeforeEach(func() {
 			var err error
 			localIP, err = localip.LocalIP()
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			statusPort = test_util.NextAvailPort()
 			proxyPort = test_util.NextAvailPort()
@@ -135,25 +137,28 @@ var _ = Describe("Router Integration", func() {
 
 		It("waits for all requests to finish", func() {
 			mbusClient, err := newMessageBus(config)
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			requestMade := make(chan bool)
 			requestProcessing := make(chan bool)
 			responseRead := make(chan bool)
 
-			longApp := test.NewTestApp([]route.Uri{"longapp.vcap.me"}, proxyPort, mbusClient, nil)
+			longApp := test.NewTestApp([]route.Uri{"longapp.vcap.me"}, proxyPort, mbusClient, nil, "")
 			longApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				requestMade <- true
 				<-requestProcessing
 				_, err := ioutil.ReadAll(r.Body)
 				defer r.Body.Close()
-				Ω(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte{'b'})
 			})
 			longApp.Listen()
 			routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
-			Ω(waitAppRegistered(routesUri, longApp, 2*time.Second)).To(BeTrue())
+
+			Eventually(func() bool {
+				return appRegistered(routesUri, longApp)
+			}).Should(BeTrue())
 
 			go func() {
 				defer GinkgoRecover()
@@ -184,25 +189,25 @@ var _ = Describe("Router Integration", func() {
 
 			requestProcessing <- true
 
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(grouter, 5).Should(Exit(0))
 			Eventually(responseRead).Should(Receive(BeTrue()))
 		})
 
-		It("will timeout if requests take too long", func() {
+		It("returns EOF error when the gorouter terminates before a request completes", func() {
 			mbusClient, err := newMessageBus(config)
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 
 			blocker := make(chan bool)
 			resultCh := make(chan error, 1)
-			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil)
+			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
 			timeoutApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				blocker <- true
 				<-blocker
 			})
 			timeoutApp.Listen()
 			routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
-			Ω(waitAppRegistered(routesUri, timeoutApp, 2*time.Second)).To(BeTrue())
+			Eventually(func() bool { return appRegistered(routesUri, timeoutApp) }).Should(BeTrue())
 
 			go func() {
 				_, err := http.Get(timeoutApp.Endpoint())
@@ -217,28 +222,28 @@ var _ = Describe("Router Integration", func() {
 			grouter := gorouterSession
 			gorouterSession = nil
 			err = grouter.Command.Process.Signal(syscall.SIGUSR1)
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(grouter, 5).Should(Exit(0))
 
 			var result error
 			Eventually(resultCh, 5).Should(Receive(&result))
-			Ω(result).Should(BeAssignableToTypeOf(&url.Error{}))
+			Expect(result).To(BeAssignableToTypeOf(&url.Error{}))
 			urlErr := result.(*url.Error)
-			Ω(urlErr.Err).Should(Equal(io.EOF))
+			Expect(urlErr.Err).To(Equal(io.EOF))
 		})
 
 		It("prevents new connections", func() {
 			mbusClient, err := newMessageBus(config)
 
 			blocker := make(chan bool)
-			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil)
+			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
 			timeoutApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				blocker <- true
 				<-blocker
 			})
 			timeoutApp.Listen()
 			routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
-			Ω(waitAppRegistered(routesUri, timeoutApp, 2*time.Second)).To(BeTrue())
+			Eventually(func() bool { return appRegistered(routesUri, timeoutApp) }).Should(BeTrue())
 
 			go func() {
 				http.Get(timeoutApp.Endpoint())
@@ -252,14 +257,14 @@ var _ = Describe("Router Integration", func() {
 			grouter := gorouterSession
 			gorouterSession = nil
 			err = grouter.Command.Process.Signal(syscall.SIGUSR1)
-			Ω(err).ShouldNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
 			Eventually(grouter, 5).Should(Exit(0))
 
 			_, err = http.Get(timeoutApp.Endpoint())
-			Ω(err).Should(HaveOccurred())
+			Expect(err).To(HaveOccurred())
 			urlErr := err.(*url.Error)
 			opErr := urlErr.Err.(*net.OpError)
-			Ω(opErr.Op).Should(Equal("dial"))
+			Expect(opErr.Op).To(Equal("dial"))
 		})
 
 		Context("when ssl is enabled", func() {
@@ -272,7 +277,7 @@ var _ = Describe("Router Integration", func() {
 				gorouterSession = nil
 				err := grouter.Command.Process.Signal(syscall.SIGUSR1)
 
-				Ω(err).ShouldNot(HaveOccurred())
+				Expect(err).ToNot(HaveOccurred())
 				Eventually(grouter, 5).Should(Exit(0))
 			})
 		})
@@ -294,9 +299,20 @@ var _ = Describe("Router Integration", func() {
 		})
 	})
 
+	It("logs component logs", func() {
+		statusPort := test_util.NextAvailPort()
+		proxyPort := test_util.NextAvailPort()
+		cfgFile := filepath.Join(tmpdir, "config.yml")
+		createConfig(cfgFile, statusPort, proxyPort)
+
+		gorouterSession = startGorouterSession(cfgFile)
+
+		Expect(gorouterSession.Out.Contents()).To(ContainSubstring("Component Router registered successfully"))
+	})
+
 	It("has Nats connectivity", func() {
 		localIP, err := localip.LocalIP()
-		Ω(err).ShouldNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		statusPort := test_util.NextAvailPort()
 		proxyPort := test_util.NextAvailPort()
@@ -316,8 +332,8 @@ var _ = Describe("Router Integration", func() {
 
 		routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
 
-		Ω(waitAppRegistered(routesUri, zombieApp, 2*time.Second)).To(BeTrue())
-		Ω(waitAppRegistered(routesUri, runningApp, 2*time.Second)).To(BeTrue())
+		Eventually(func() bool { return appRegistered(routesUri, zombieApp) }).Should(BeTrue())
+		Eventually(func() bool { return appRegistered(routesUri, runningApp) }).Should(BeTrue())
 
 		heartbeatInterval := 200 * time.Millisecond
 		zombieTicker := time.NewTicker(heartbeatInterval)
@@ -335,6 +351,7 @@ var _ = Describe("Router Integration", func() {
 		}()
 
 		zombieApp.VerifyAppStatus(200)
+		runningApp.VerifyAppStatus(200)
 
 		// Give enough time to register multiple times
 		time.Sleep(heartbeatInterval * 3)
@@ -347,43 +364,74 @@ var _ = Describe("Router Integration", func() {
 		staleCheckInterval := config.PruneStaleDropletsInterval
 		staleThreshold := config.DropletStaleThreshold
 		// Give router time to make a bad decision (i.e. prune routes)
-		time.Sleep(staleCheckInterval + staleThreshold + 250*time.Millisecond)
+		time.Sleep(10 * (staleCheckInterval + staleThreshold))
 
-		// While NATS is down no routes should go down
-		zombieApp.VerifyAppStatus(200)
-		runningApp.VerifyAppStatus(200)
+		// While NATS is down all routes should go down
+		zombieApp.VerifyAppStatus(404)
+		runningApp.VerifyAppStatus(404)
 
 		natsRunner.Start()
 
-		// Right after NATS starts up all routes should stay up
-		zombieApp.VerifyAppStatus(200)
+		// After NATS starts up the zombie should stay gone
+		zombieApp.VerifyAppStatus(404)
 		runningApp.VerifyAppStatus(200)
+	})
 
-		zombieGone := make(chan bool)
+	Context("when the route_services_secret and the route_services_secret_decrypt_only are valid", func() {
+		It("starts fine", func() {
+			statusPort := test_util.NextAvailPort()
+			proxyPort := test_util.NextAvailPort()
 
-		go func() {
-			for {
-				// Finally the zombie is cleaned up. Maybe proactively enqueue Unregister events in DEA's.
-				err := zombieApp.CheckAppStatus(404)
-				if err != nil {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
+			cfgFile := filepath.Join(tmpdir, "config.yml")
+			config := createConfig(cfgFile, statusPort, proxyPort)
+			config.RouteServiceSecret = "route-service-secret"
+			config.RouteServiceSecretPrev = "my-previous-route-service-secret"
+			writeConfig(config, cfgFile)
 
-				err = runningApp.CheckAppStatus(200)
-				if err != nil {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
+			// The process should not have any error.
+			session := startGorouterSession(cfgFile)
+			stopGorouter(session)
+		})
+	})
 
-				zombieGone <- true
+	Context("when the routing api is enabled", func() {
+		var (
+			config  *config.Config
+			cfgFile string
+		)
 
-				break
-			}
-		}()
+		BeforeEach(func() {
+			statusPort := test_util.NextAvailPort()
+			proxyPort := test_util.NextAvailPort()
 
-		waitTime := staleCheckInterval + staleThreshold + 5*time.Second
-		Eventually(zombieGone, waitTime.Seconds()).Should(Receive())
+			cfgFile = filepath.Join(tmpdir, "config.yml")
+			config = createConfig(cfgFile, statusPort, proxyPort)
+			config.RoutingApi.Uri = "http://localhost"
+			config.RoutingApi.Port = 4567
+		})
+
+		Context("when the routing api auth is disabled ", func() {
+			It("uses the no-op token fetcher", func() {
+				config.RoutingApi.AuthDisabled = true
+				writeConfig(config, cfgFile)
+
+				// note, this will start with routing api, but will not be able to connect
+				session := startGorouterSession(cfgFile)
+				Expect(gorouterSession.Out.Contents()).To(ContainSubstring("using noop token fetcher"))
+				stopGorouter(session)
+			})
+		})
+
+		Context("when the routing api auth is enabled (default)", func() {
+			It("uses the uaa token fetcher", func() {
+				writeConfig(config, cfgFile)
+
+				// note, this will start with routing api, but will not be able to connect
+				session := startGorouterSession(cfgFile)
+				Expect(gorouterSession.Out.Contents()).To(ContainSubstring("using uaa token fetcher"))
+				stopGorouter(session)
+			})
+		})
 	})
 })
 
@@ -401,46 +449,34 @@ func newMessageBus(c *config.Config) (yagnats.NATSConn, error) {
 	return yagnats.Connect(natsMembers)
 }
 
-func waitAppRegistered(routesUri string, app *test.TestApp, timeout time.Duration) bool {
-	return waitMsgReceived(routesUri, app, true, timeout)
+func appRegistered(routesUri string, app *test.TestApp) bool {
+	routeFound, err := routeExists(routesUri, string(app.Urls()[0]))
+	return err == nil && routeFound
 }
 
-func waitAppUnregistered(routesUri string, app *test.TestApp, timeout time.Duration) bool {
-	return waitMsgReceived(routesUri, app, false, timeout)
+func appUnregistered(routesUri string, app *test.TestApp) bool {
+	routeFound, err := routeExists(routesUri, string(app.Urls()[0]))
+	return err == nil && !routeFound
 }
 
-func waitMsgReceived(uri string, app *test.TestApp, expectedToBeFound bool, timeout time.Duration) bool {
-	interval := time.Millisecond * 50
-	repetitions := int(timeout / interval)
-
-	for j := 0; j < repetitions; j++ {
-		resp, err := http.Get(uri)
-		if err == nil {
-			switch resp.StatusCode {
-			case http.StatusOK:
-				bytes, err := ioutil.ReadAll(resp.Body)
-				resp.Body.Close()
-				Ω(err).ShouldNot(HaveOccurred())
-				routes := make(map[string][]string)
-				err = json.Unmarshal(bytes, &routes)
-				Ω(err).ShouldNot(HaveOccurred())
-				route := routes[string(app.Urls()[0])]
-				if expectedToBeFound {
-					if route != nil {
-						return true
-					}
-				} else {
-					if route == nil {
-						return true
-					}
-				}
-			default:
-				println("Failed to receive routes: ", resp.StatusCode, uri)
-			}
-		}
-
-		time.Sleep(interval)
+func routeExists(routesEndpoint, routeName string) (bool, error) {
+	resp, err := http.Get(routesEndpoint)
+	if err != nil {
+		return false, err
 	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		bytes, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		Expect(err).ToNot(HaveOccurred())
+		routes := make(map[string]interface{})
+		err = json.Unmarshal(bytes, &routes)
+		Expect(err).ToNot(HaveOccurred())
 
-	return false
+		_, found := routes[routeName]
+		return found, nil
+
+	default:
+		return false, errors.New("Didn't get an OK response")
+	}
 }

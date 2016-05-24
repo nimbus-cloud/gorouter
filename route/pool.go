@@ -36,6 +36,9 @@ type Pool struct {
 	preferred_endpoints []*endpointElem
 	index     map[string]*endpointElem
 
+	contextPath     string
+	routeServiceUrl string
+
 	preferred_network *net.IPNet
 
 	retryAfterFailure time.Duration
@@ -43,7 +46,7 @@ type Pool struct {
 	nextPreferredIdx  int
 }
 
-func NewPool(retryAfterFailure time.Duration, pnetwork *net.IPNet) *Pool {
+func NewPool(retryAfterFailure time.Duration, contextPath string, pnetwork *net.IPNet) *Pool {
 	return &Pool{
 		endpoints:         make([]*endpointElem, 0, 1),
 		preferred_endpoints: make([]*endpointElem, 0, 1),
@@ -52,7 +55,12 @@ func NewPool(retryAfterFailure time.Duration, pnetwork *net.IPNet) *Pool {
 		retryAfterFailure: retryAfterFailure,
 		nextIdx:           -1,
 		nextPreferredIdx:  -1,
+		contextPath:       contextPath,
 	}
+}
+
+func (p *Pool) ContextPath() string {
+	return p.contextPath
 }
 
 func (p *Pool) Put(endpoint *Endpoint) bool {
@@ -95,6 +103,18 @@ func (p *Pool) Put(endpoint *Endpoint) bool {
 	e.updated = time.Now()
 
 	return !found
+}
+
+func (p *Pool) RouteServiceUrl() string {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	if len(p.endpoints) > 0 {
+		endpt := p.endpoints[0]
+		return endpt.endpoint.RouteServiceUrl
+	} else {
+		return ""
+	}
 }
 
 func (p *Pool) PruneEndpoints(defaultThreshold time.Duration) {
@@ -271,13 +291,13 @@ func (p *Pool) Each(f func(endpoint *Endpoint)) {
 
 func (p *Pool) MarshalJSON() ([]byte, error) {
 	p.lock.Lock()
-	addresses := make([]string, 0, len(p.endpoints))
+	endpoints := make([]Endpoint, 0, len(p.endpoints))
 	for _, e := range p.endpoints {
-		addresses = append(addresses, e.endpoint.addr)
+		endpoints = append(endpoints, *e.endpoint)
 	}
 	p.lock.Unlock()
 
-	return json.Marshal(addresses)
+	return json.Marshal(endpoints)
 }
 
 func newEndpointIterator(p *Pool, initial string) EndpointIterator {

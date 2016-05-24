@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"text/template"
 
 	"github.com/cloudfoundry-incubator/routing-api"
 	"github.com/cloudfoundry-incubator/routing-api/cmd/routing-api/testrunner"
@@ -12,8 +13,6 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
-	"github.com/tedsuo/ifrit"
-	"github.com/tedsuo/ifrit/ginkgomon"
 
 	"testing"
 	"time"
@@ -28,8 +27,9 @@ var client routing_api.Client
 var routingAPIBinPath string
 var routingAPIAddress string
 var routingAPIArgs testrunner.Args
-var routingAPIRunner *ginkgomon.Runner
-var routingAPIProcess ifrit.Process
+var routingAPIPort uint16
+var routingAPIIP string
+var routingAPISystemDomain string
 
 func TestMain(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -48,10 +48,7 @@ var _ = SynchronizedBeforeSuite(
 	},
 )
 
-var _ = SynchronizedAfterSuite(func() {
-}, func() {
-	gexec.CleanupBuildArtifacts()
-})
+var _ = SynchronizedAfterSuite(func() {}, gexec.CleanupBuildArtifacts)
 
 var _ = BeforeEach(func() {
 	etcdPort = 4001 + GinkgoParallelNode()
@@ -60,8 +57,10 @@ var _ = BeforeEach(func() {
 	etcdRunner.Start()
 
 	etcdAdapter = etcdRunner.Adapter()
-	port := 6900 + GinkgoParallelNode()
-	routingAPIAddress = fmt.Sprintf("127.0.0.1:%d", port)
+	routingAPIPort = uint16(6900 + GinkgoParallelNode())
+	routingAPIIP = "127.0.0.1"
+	routingAPISystemDomain = "example.com"
+	routingAPIAddress = fmt.Sprintf("%s:%d", routingAPIIP, routingAPIPort)
 
 	routingAPIURL := &url.URL{
 		Scheme: "http",
@@ -69,18 +68,38 @@ var _ = BeforeEach(func() {
 	}
 
 	client = routing_api.NewClient(routingAPIURL.String())
-	workingDir, _ := os.Getwd()
 
 	routingAPIArgs = testrunner.Args{
-		Port:        port,
-		ConfigPath:  workingDir + "/../../example_config/example.yml",
-		EtcdCluster: etcdUrl,
-		DevMode:     true,
+		Port:         routingAPIPort,
+		IP:           routingAPIIP,
+		SystemDomain: routingAPISystemDomain,
+		ConfigPath:   createConfig(),
+		EtcdCluster:  etcdUrl,
+		DevMode:      true,
 	}
-	routingAPIRunner = testrunner.New(routingAPIBinPath, routingAPIArgs)
 })
 
 var _ = AfterEach(func() {
 	etcdAdapter.Disconnect()
+	etcdRunner.Reset()
 	etcdRunner.Stop()
 })
+
+func createConfig() string {
+	type statsdConfig struct {
+		Port int
+	}
+	actualStatsdConfig := statsdConfig{Port: 8125 + GinkgoParallelNode()}
+	workingDir, _ := os.Getwd()
+	template, err := template.ParseFiles(workingDir + "/../../example_config/example_template.yml")
+	Expect(err).NotTo(HaveOccurred())
+	configFilePath := fmt.Sprintf("/tmp/example_%d.yml", GinkgoParallelNode())
+	configFile, err := os.Create(configFilePath)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = template.Execute(configFile, actualStatsdConfig)
+	configFile.Close()
+	Expect(err).NotTo(HaveOccurred())
+
+	return configFilePath
+}

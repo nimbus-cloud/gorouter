@@ -14,16 +14,17 @@ import (
 	. "github.com/onsi/gomega"
 
 	"strconv"
+	"github.com/cloudfoundry/gorouter/metrics/fakes"
 )
 
 var _ = Describe("AccessLogRecord", func() {
 	Measure("Register", func(b Benchmarker) {
 		c := config.DefaultConfig()
 		mbus := fakeyagnats.Connect()
-		r := registry.NewRouteRegistry(c, mbus)
+		r := registry.NewRouteRegistry(c, mbus, new(fakes.FakeRouteReporter))
 
 		accesslog, err := access_log.CreateRunningAccessLogger(c)
-		Ω(err).ToNot(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		proxy.NewProxy(proxy.ProxyArgs{
 			EndpointTimeout: c.EndpointTimeout,
@@ -39,7 +40,7 @@ var _ = Describe("AccessLogRecord", func() {
 				str := strconv.Itoa(i)
 				r.Register(
 					route.Uri("bench.vcap.me."+str),
-					route.NewEndpoint("", "localhost", uint16(i), "", nil, -1),
+					route.NewEndpoint("", "localhost", uint16(i), "", nil, -1, ""),
 				)
 			}
 		})

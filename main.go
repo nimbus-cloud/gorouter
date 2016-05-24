@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/tls"
+
 	"github.com/apcera/nats"
 	cf_debug_server "github.com/cloudfoundry-incubator/cf-debug-server"
-	"github.com/cloudfoundry-incubator/routing-api"
+	routing_api "github.com/cloudfoundry-incubator/routing-api"
 	token_fetcher "github.com/cloudfoundry-incubator/uaa-token-fetcher"
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/gorouter/access_log"
 	vcap "github.com/cloudfoundry/gorouter/common"
+	"github.com/cloudfoundry/gorouter/common/secure"
 	"github.com/cloudfoundry/gorouter/config"
 	"github.com/cloudfoundry/gorouter/proxy"
 	rregistry "github.com/cloudfoundry/gorouter/registry"
@@ -19,6 +22,7 @@ import (
 
 	"flag"
 	"fmt"
+	"github.com/cloudfoundry/gorouter/metrics"
 	"os"
 	"os/signal"
 	"runtime"
@@ -60,71 +64,52 @@ func main() {
 		cf_debug_server.Run(c.DebugAddr)
 	}
 
-	natsServers := c.NatsServers()
-	var natsClient yagnats.NATSConn
-	attempts := 3
-	for attempts > 0 {
-		natsClient, err = yagnats.Connect(natsServers)
-		if err == nil {
-			break
-		} else {
-			attempts--
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
+	logger.Info("Setting up NATs connection")
+	natsClient := connectToNatsServer(c, logger)
 
-	if err != nil {
-		logger.Errorf("Error connecting to NATS: %s\n", err)
-		os.Exit(1)
-	}
+	metricsReporter := metrics.NewMetricsReporter()
+	registry := rregistry.NewRouteRegistry(c, natsClient, metricsReporter)
 
-	natsClient.AddClosedCB(func(conn *nats.Conn) {
-		logger.Errorf("Close on NATS client. nats.Conn: %+v", *conn)
-		os.Exit(1)
-	})
-
-	registry := rregistry.NewRouteRegistry(c, natsClient)
-
-	if c.RoutingApiEnabled() {
-		logger.Info("Setting up routing_api route fetcher")
-		tokenFetcher := token_fetcher.NewTokenFetcher(&c.OAuth)
-		routingApiUri := fmt.Sprintf("%s:%d", c.RoutingApi.Uri, c.RoutingApi.Port)
-		routingApiClient := routing_api.NewClient(routingApiUri)
-		routeFetcher := route_fetcher.NewRouteFetcher(steno.NewLogger("router.route_fetcher"), tokenFetcher, registry, c, routingApiClient, 1)
-		routeFetcher.StartFetchCycle()
-		routeFetcher.StartEventCycle()
-	}
+	logger.Info("Setting up routing_api route fetcher")
+	setupRouteFetcher(c, registry, logger)
 
 	varz := rvarz.NewVarz(registry)
+	compositeReporter := metrics.NewCompositeReporter(varz, metricsReporter)
 
 	accessLogger, err := access_log.CreateRunningAccessLogger(c)
 	if err != nil {
 		logger.Fatalf("Error creating access logger: %s\n", err)
 	}
 
-	args := proxy.ProxyArgs{
-		EndpointTimeout: c.EndpointTimeout,
-		Ip:              c.Ip,
-		TraceKey:        c.TraceKey,
-		Registry:        registry,
-		Reporter:        varz,
-		AccessLogger:    accessLogger,
-		SecureCookies:   c.SecureCookies,
+	var crypto secure.Crypto
+	var cryptoPrev secure.Crypto
+	if c.RouteServiceEnabled {
+		crypto = createCrypto(c.RouteServiceSecret, logger)
+		if c.RouteServiceSecretPrev != "" {
+			cryptoPrev = createCrypto(c.RouteServiceSecretPrev, logger)
+		}
 	}
-	p := proxy.NewProxy(args)
 
-	router, err := router.NewRouter(c, p, natsClient, registry, varz, logCounter)
+	proxy := buildProxy(c, registry, accessLogger, compositeReporter, crypto, cryptoPrev)
+
+	router, err := router.NewRouter(c, proxy, natsClient, registry, varz, logCounter)
 	if err != nil {
 		logger.Errorf("An error occurred: %s", err.Error())
 		os.Exit(1)
 	}
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
-
 	errChan := router.Run()
 
 	logger.Info("gorouter.started")
+
+	waitOnErrOrSignal(c, logger, errChan, router)
+
+	os.Exit(0)
+}
+
+func waitOnErrOrSignal(c *config.Config, logger *steno.Logger, errChan <-chan error, router *router.Router) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 
 	select {
 	case err := <-errChan:
@@ -168,8 +153,89 @@ func main() {
 			"gorouter.stopped",
 		)
 	}
+}
 
-	os.Exit(0)
+func createCrypto(secret string, logger *steno.Logger) *secure.AesGCM {
+	// generate secure encryption key using key derivation function (pbkdf2)
+	secretPbkdf2 := secure.NewPbkdf2([]byte(secret), 16)
+	crypto, err := secure.NewAesGCM(secretPbkdf2)
+	if err != nil {
+		logger.Errorf("Error creating route service crypto: %s\n", err)
+		os.Exit(1)
+	}
+	return crypto
+}
+
+func buildProxy(c *config.Config, registry rregistry.RegistryInterface, accessLogger access_log.AccessLogger, reporter metrics.ProxyReporter, crypto secure.Crypto, cryptoPrev secure.Crypto) proxy.Proxy {
+	args := proxy.ProxyArgs{
+		EndpointTimeout: c.EndpointTimeout,
+		Ip:              c.Ip,
+		TraceKey:        c.TraceKey,
+		Registry:        registry,
+		Reporter:        reporter,
+		AccessLogger:    accessLogger,
+		SecureCookies:   c.SecureCookies,
+		TLSConfig: &tls.Config{
+			CipherSuites:       c.CipherSuites,
+			InsecureSkipVerify: c.SSLSkipValidation,
+		},
+		RouteServiceEnabled: c.RouteServiceEnabled,
+		RouteServiceTimeout: c.RouteServiceTimeout,
+		Crypto:              crypto,
+		CryptoPrev:          cryptoPrev,
+		ExtraHeadersToLog:   c.ExtraHeadersToLog,
+	}
+	return proxy.NewProxy(args)
+}
+
+func setupRouteFetcher(c *config.Config, registry rregistry.RegistryInterface, logger *steno.Logger) {
+	if c.RoutingApiEnabled() {
+		tokenFetcher := newTokenFetcher(c, logger)
+		routingApiUri := fmt.Sprintf("%s:%d", c.RoutingApi.Uri, c.RoutingApi.Port)
+		routingApiClient := routing_api.NewClient(routingApiUri)
+		routeFetcher := route_fetcher.NewRouteFetcher(steno.NewLogger("router.route_fetcher"), tokenFetcher, registry, c, routingApiClient, 1)
+		routeFetcher.StartFetchCycle()
+		routeFetcher.StartEventCycle()
+	}
+}
+
+func newTokenFetcher(c *config.Config, logger *steno.Logger) token_fetcher.TokenFetcher {
+	if c.RoutingApi.AuthDisabled {
+		logger.Info("using noop token fetcher")
+		return token_fetcher.NewNoOpTokenFetcher()
+	}
+	tokenFetcher := token_fetcher.NewTokenFetcher(&c.OAuth)
+	logger.Info("using uaa token fetcher")
+	return tokenFetcher
+}
+
+func connectToNatsServer(c *config.Config, logger *steno.Logger) yagnats.NATSConn {
+	var natsClient yagnats.NATSConn
+	var err error
+
+	natsServers := c.NatsServers()
+	attempts := 3
+	for attempts > 0 {
+		natsClient, err = yagnats.Connect(natsServers)
+		if err == nil {
+			break
+		} else {
+			attempts--
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	if err != nil {
+		logger.Errorf("Error connecting to NATS: %s\n", err)
+		os.Exit(1)
+	}
+
+	natsClient.AddClosedCB(func(conn *nats.Conn) {
+		logger.Errorf("Close on NATS client. nats.Conn: %+v", *conn)
+		os.Exit(1)
+	})
+
+	return natsClient
 }
 
 func InitLoggerFromConfig(c *config.Config, logCounter *vcap.LogCounter) {

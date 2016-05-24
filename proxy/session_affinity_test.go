@@ -17,7 +17,7 @@ var _ = Describe("Session Affinity", func() {
 
 	responseNoCookies := func(x *test_util.HttpConn) {
 		_, err := http.ReadRequest(x.Reader)
-		Ω(err).NotTo(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		resp := test_util.NewResponse(http.StatusOK)
 		x.WriteResponse(resp)
@@ -27,7 +27,7 @@ var _ = Describe("Session Affinity", func() {
 
 	responseWithJSessionID := func(x *test_util.HttpConn) {
 		_, err := http.ReadRequest(x.Reader)
-		Ω(err).NotTo(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		resp := test_util.NewResponse(http.StatusOK)
 		resp.Header.Add("Set-Cookie", jSessionIdCookie.String())
@@ -48,46 +48,143 @@ var _ = Describe("Session Affinity", func() {
 		}
 	})
 
+	Context("context paths", func() {
+		Context("when two requests have the same context paths", func() {
+			It("responds with the same instance id", func() {
+				ln := registerHandlerWithInstanceId(r, "app.com/path1", "", responseWithJSessionID, "instance-id-1")
+				defer ln.Close()
+				ln2 := registerHandlerWithInstanceId(r, "app.com/path2/context/path", "", responseWithJSessionID, "instance-id-2")
+				defer ln2.Close()
+
+				conn := dialProxy(proxyServer)
+				req := test_util.NewRequest("GET", "app.com", "/path1/some/sub/path/index.html", nil)
+				conn.WriteRequest(req)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ := conn.ReadResponse()
+				cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/path1"))
+				Expect(cookie.Value).To(Equal("instance-id-1"))
+
+				req2 := test_util.NewRequest("GET", "app.com", "/path1/other/sub/path/index.html", nil)
+				conn.WriteRequest(req2)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ = conn.ReadResponse()
+				cookie = getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/path1"))
+				Expect(cookie.Value).To(Equal("instance-id-1"))
+			})
+		})
+
+		Context("when two requests have different context paths", func() {
+			It("responds with different instance ids", func() {
+				ln := registerHandlerWithInstanceId(r, "app.com/path1", "", responseWithJSessionID, "instance-id-1")
+				defer ln.Close()
+				ln2 := registerHandlerWithInstanceId(r, "app.com/path2/context/path", "", responseWithJSessionID, "instance-id-2")
+				defer ln2.Close()
+
+				conn := dialProxy(proxyServer)
+				req := test_util.NewRequest("GET", "app.com", "/path1/some/sub/path/index.html", nil)
+				conn.WriteRequest(req)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ := conn.ReadResponse()
+				cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/path1"))
+				Expect(cookie.Value).To(Equal("instance-id-1"))
+
+				req2 := test_util.NewRequest("GET", "app.com", "/path2/context/path/index.html", nil)
+				conn.WriteRequest(req2)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ = conn.ReadResponse()
+				cookie = getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/path2/context/path"))
+				Expect(cookie.Value).To(Equal("instance-id-2"))
+			})
+		})
+
+		Context("when only one request has a context path", func() {
+			It("responds with different instance ids", func() {
+				ln := registerHandlerWithInstanceId(r, "app.com/path1", "", responseWithJSessionID, "instance-id-1")
+				defer ln.Close()
+				ln2 := registerHandlerWithInstanceId(r, "app.com", "", responseWithJSessionID, "instance-id-2")
+				defer ln2.Close()
+
+				conn := dialProxy(proxyServer)
+				req := test_util.NewRequest("GET", "app.com", "/path1/some/sub/path/index.html", nil)
+				conn.WriteRequest(req)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ := conn.ReadResponse()
+				cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/path1"))
+				Expect(cookie.Value).To(Equal("instance-id-1"))
+
+				req2 := test_util.NewRequest("GET", "app.com", "/path2/context/path/index.html", nil)
+				conn.WriteRequest(req2)
+
+				Eventually(done).Should(Receive())
+
+				resp, _ = conn.ReadResponse()
+				cookie = getCookie(proxy.VcapCookieId, resp.Cookies())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Path).To(Equal("/"))
+				Expect(cookie.Value).To(Equal("instance-id-2"))
+			})
+		})
+
+	})
+
 	Context("first request", func() {
 		Context("when the response does not contain a JESSIONID cookie", func() {
 			It("does not respond with a VCAP_ID cookie", func() {
-				ln := registerHandlerWithInstanceId(r, "app", responseNoCookies, "my-id")
+				ln := registerHandlerWithInstanceId(r, "app", "", responseNoCookies, "my-id")
 				defer ln.Close()
 
 				x := dialProxy(proxyServer)
-				req := test_util.NewRequest("GET", "/", nil)
-				req.Host = "app"
+				req := test_util.NewRequest("GET", "app", "/", nil)
 				x.WriteRequest(req)
 
 				Eventually(done).Should(Receive())
 
 				resp, _ := x.ReadResponse()
-				Ω(getCookie(proxy.VcapCookieId, resp.Cookies())).Should(BeNil())
+				Expect(getCookie(proxy.VcapCookieId, resp.Cookies())).To(BeNil())
 			})
 		})
 
 		Context("when the response contains a JESSIONID cookie", func() {
 			It("responds with a VCAP_ID cookie scoped to the session", func() {
-				ln := registerHandlerWithInstanceId(r, "app", responseWithJSessionID, "my-id")
+				ln := registerHandlerWithInstanceId(r, "app", "", responseWithJSessionID, "my-id")
 				defer ln.Close()
 
 				x := dialProxy(proxyServer)
-				req := test_util.NewRequest("GET", "/", nil)
-				req.Host = "app"
+				req := test_util.NewRequest("GET", "app", "/", nil)
 				x.WriteRequest(req)
 
 				Eventually(done).Should(Receive())
 
 				resp, _ := x.ReadResponse()
 				jsessionId := getCookie(proxy.StickyCookieKey, resp.Cookies())
-				Ω(jsessionId).ShouldNot(BeNil())
+				Expect(jsessionId).ToNot(BeNil())
 
 				cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
-				Ω(cookie).ShouldNot(BeNil())
-				Ω(cookie.Value).Should(Equal("my-id"))
-				Ω(cookie.Secure).Should(BeFalse())
-				Ω(cookie.MaxAge).Should(BeZero())
-				Ω(cookie.Expires).Should(BeZero())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Value).To(Equal("my-id"))
+				Expect(cookie.Secure).To(BeFalse())
+				Expect(cookie.MaxAge).To(BeZero())
+				Expect(cookie.Expires).To(BeZero())
 			})
 
 			Context("with secure cookies enabled", func() {
@@ -96,26 +193,25 @@ var _ = Describe("Session Affinity", func() {
 				})
 
 				It("marks the cookie as secure only", func() {
-					ln := registerHandlerWithInstanceId(r, "app", responseWithJSessionID, "my-id")
+					ln := registerHandlerWithInstanceId(r, "app", "", responseWithJSessionID, "my-id")
 					defer ln.Close()
 
 					x := dialProxy(proxyServer)
-					req := test_util.NewRequest("GET", "/", nil)
-					req.Host = "app"
+					req := test_util.NewRequest("GET", "app", "/", nil)
 					x.WriteRequest(req)
 
 					Eventually(done).Should(Receive())
 
 					resp, _ := x.ReadResponse()
 					jsessionId := getCookie(proxy.StickyCookieKey, resp.Cookies())
-					Ω(jsessionId).ShouldNot(BeNil())
+					Expect(jsessionId).ToNot(BeNil())
 
 					cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
-					Ω(cookie).ShouldNot(BeNil())
-					Ω(cookie.Value).Should(Equal("my-id"))
-					Ω(cookie.Secure).Should(BeTrue())
-					Ω(cookie.MaxAge).Should(BeZero())
-					Ω(cookie.Expires).Should(BeZero())
+					Expect(cookie).ToNot(BeNil())
+					Expect(cookie.Value).To(Equal("my-id"))
+					Expect(cookie.Secure).To(BeTrue())
+					Expect(cookie.MaxAge).To(BeZero())
+					Expect(cookie.Expires).To(BeZero())
 				})
 			})
 		})
@@ -135,8 +231,7 @@ var _ = Describe("Session Affinity", func() {
 				Secure:   false,
 			}
 
-			req = test_util.NewRequest("GET", "/", nil)
-			req.Host = host
+			req = test_util.NewRequest("GET", host, "/", nil)
 			req.AddCookie(cookie)
 
 			jSessionIdCookie := &http.Cookie{
@@ -148,7 +243,7 @@ var _ = Describe("Session Affinity", func() {
 
 		Context("when the response does not contain a JESSIONID cookie", func() {
 			It("does not respond with a VCAP_ID cookie", func() {
-				ln := registerHandlerWithInstanceId(r, host, responseNoCookies, "my-id")
+				ln := registerHandlerWithInstanceId(r, host, "", responseNoCookies, "my-id")
 				defer ln.Close()
 
 				x := dialProxy(proxyServer)
@@ -158,13 +253,13 @@ var _ = Describe("Session Affinity", func() {
 				Eventually(done).Should(Receive())
 
 				resp, _ := x.ReadResponse()
-				Ω(getCookie(proxy.StickyCookieKey, resp.Cookies())).Should(BeNil())
-				Ω(getCookie(proxy.VcapCookieId, resp.Cookies())).Should(BeNil())
+				Expect(getCookie(proxy.StickyCookieKey, resp.Cookies())).To(BeNil())
+				Expect(getCookie(proxy.VcapCookieId, resp.Cookies())).To(BeNil())
 			})
 
 			Context("when the preferred server is gone", func() {
 				It("updates the VCAP_ID with the new server", func() {
-					ln := registerHandlerWithInstanceId(r, host, responseNoCookies, "other-id")
+					ln := registerHandlerWithInstanceId(r, host, "", responseNoCookies, "other-id")
 					defer ln.Close()
 
 					x := dialProxy(proxyServer)
@@ -175,37 +270,36 @@ var _ = Describe("Session Affinity", func() {
 
 					resp, _ := x.ReadResponse()
 					cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
-					Ω(cookie).ShouldNot(BeNil())
-					Ω(cookie.Value).Should(Equal("other-id"))
-					Ω(cookie.Secure).Should(BeFalse())
-					Ω(cookie.MaxAge).Should(BeZero())
-					Ω(cookie.Expires).Should(BeZero())
+					Expect(cookie).ToNot(BeNil())
+					Expect(cookie.Value).To(Equal("other-id"))
+					Expect(cookie.Secure).To(BeFalse())
+					Expect(cookie.MaxAge).To(BeZero())
+					Expect(cookie.Expires).To(BeZero())
 				})
 			})
 		})
 
 		Context("when the response contains a JESSIONID cookie", func() {
 			It("responds with a VCAP_ID cookie", func() {
-				ln := registerHandlerWithInstanceId(r, "app", responseWithJSessionID, "some-id")
+				ln := registerHandlerWithInstanceId(r, "app", "", responseWithJSessionID, "some-id")
 				defer ln.Close()
 
 				x := dialProxy(proxyServer)
-				req := test_util.NewRequest("GET", "/", nil)
-				req.Host = "app"
+				req := test_util.NewRequest("GET", "app", "/", nil)
 				x.WriteRequest(req)
 
 				Eventually(done).Should(Receive())
 
 				resp, _ := x.ReadResponse()
 				jsessionId := getCookie(proxy.StickyCookieKey, resp.Cookies())
-				Ω(jsessionId).ShouldNot(BeNil())
+				Expect(jsessionId).ToNot(BeNil())
 
 				cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
-				Ω(cookie).ShouldNot(BeNil())
-				Ω(cookie.Value).Should(Equal("some-id"))
-				Ω(cookie.Secure).Should(BeFalse())
-				Ω(cookie.MaxAge).Should(BeZero())
-				Ω(cookie.Expires).Should(BeZero())
+				Expect(cookie).ToNot(BeNil())
+				Expect(cookie.Value).To(Equal("some-id"))
+				Expect(cookie.Secure).To(BeFalse())
+				Expect(cookie.MaxAge).To(BeZero())
+				Expect(cookie.Expires).To(BeZero())
 			})
 
 			Context("when the JSESSIONID is expired", func() {
@@ -214,27 +308,26 @@ var _ = Describe("Session Affinity", func() {
 				})
 
 				It("expires the VCAP_ID", func() {
-					ln := registerHandlerWithInstanceId(r, "app", responseWithJSessionID, "my-id")
+					ln := registerHandlerWithInstanceId(r, "app", "", responseWithJSessionID, "my-id")
 					defer ln.Close()
 
 					x := dialProxy(proxyServer)
-					req := test_util.NewRequest("GET", "/", nil)
-					req.Host = "app"
+					req := test_util.NewRequest("GET", "app", "/", nil)
 					x.WriteRequest(req)
 
 					Eventually(done).Should(Receive())
 
 					resp, _ := x.ReadResponse()
 					jsessionId := getCookie(proxy.StickyCookieKey, resp.Cookies())
-					Ω(jsessionId).ShouldNot(BeNil())
-					Ω(jsessionId.MaxAge).Should(Equal(-1))
+					Expect(jsessionId).ToNot(BeNil())
+					Expect(jsessionId.MaxAge).To(Equal(-1))
 
 					cookie := getCookie(proxy.VcapCookieId, resp.Cookies())
-					Ω(cookie).ShouldNot(BeNil())
-					Ω(cookie.Value).Should(Equal("my-id"))
-					Ω(cookie.Secure).Should(BeFalse())
-					Ω(cookie.MaxAge).Should(Equal(-1))
-					Ω(cookie.Expires).Should(BeZero())
+					Expect(cookie).ToNot(BeNil())
+					Expect(cookie.Value).To(Equal("my-id"))
+					Expect(cookie.Secure).To(BeFalse())
+					Expect(cookie.MaxAge).To(Equal(-1))
+					Expect(cookie.Expires).To(BeZero())
 				})
 			})
 		})

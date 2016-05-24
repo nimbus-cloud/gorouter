@@ -30,9 +30,9 @@ status:
 
 			config.Initialize(b)
 
-			Ω(config.Status.Port).To(Equal(uint16(1234)))
-			Ω(config.Status.User).To(Equal("user"))
-			Ω(config.Status.Pass).To(Equal("pass"))
+			Expect(config.Status.Port).To(Equal(uint16(1234)))
+			Expect(config.Status.User).To(Equal("user"))
+			Expect(config.Status.Pass).To(Equal("pass"))
 
 		})
 
@@ -43,7 +43,7 @@ endpoint_timeout: 10
 
 			config.Initialize(b)
 
-			Ω(config.EndpointTimeoutInSeconds).To(Equal(10))
+			Expect(config.EndpointTimeoutInSeconds).To(Equal(10))
 		})
 
 		It("sets drain timeout", func() {
@@ -53,7 +53,7 @@ drain_timeout: 10
 
 			config.Initialize(b)
 
-			Ω(config.DrainTimeoutInSeconds).To(Equal(10))
+			Expect(config.DrainTimeoutInSeconds).To(Equal(10))
 		})
 
 		It("sets nats config", func() {
@@ -66,18 +66,18 @@ nats:
 `)
 			config.Initialize(b)
 
-			Ω(config.Nats).To(HaveLen(1))
-			Ω(config.Nats[0].Host).To(Equal("remotehost"))
-			Ω(config.Nats[0].Port).To(Equal(uint16(4223)))
-			Ω(config.Nats[0].User).To(Equal("user"))
-			Ω(config.Nats[0].Pass).To(Equal("pass"))
+			Expect(config.Nats).To(HaveLen(1))
+			Expect(config.Nats[0].Host).To(Equal("remotehost"))
+			Expect(config.Nats[0].Port).To(Equal(uint16(4223)))
+			Expect(config.Nats[0].User).To(Equal("user"))
+			Expect(config.Nats[0].Pass).To(Equal("pass"))
 		})
 
 		It("sets default logging configs", func() {
-			Ω(config.Logging.File).To(Equal(""))
-			Ω(config.Logging.Syslog).To(Equal(""))
-			Ω(config.Logging.Level).To(Equal("debug"))
-			Ω(config.Logging.LoggregatorEnabled).To(Equal(false))
+			Expect(config.Logging.File).To(Equal(""))
+			Expect(config.Logging.Syslog).To(Equal(""))
+			Expect(config.Logging.Level).To(Equal("debug"))
+			Expect(config.Logging.LoggregatorEnabled).To(Equal(false))
 		})
 
 		It("sets logging config", func() {
@@ -90,10 +90,10 @@ logging:
 `)
 			config.Initialize(b)
 
-			Ω(config.Logging.File).To(Equal("/tmp/file"))
-			Ω(config.Logging.Syslog).To(Equal("syslog"))
-			Ω(config.Logging.Level).To(Equal("debug2"))
-			Ω(config.Logging.LoggregatorEnabled).To(Equal(true))
+			Expect(config.Logging.File).To(Equal("/tmp/file"))
+			Expect(config.Logging.Syslog).To(Equal("syslog"))
+			Expect(config.Logging.Level).To(Equal("debug2"))
+			Expect(config.Logging.LoggregatorEnabled).To(Equal(true))
 		})
 
 		It("configures preferred_network", func() {
@@ -125,13 +125,13 @@ enable_ssl: true
 
 			config.Initialize(b)
 
-			Ω(config.Port).To(Equal(uint16(8082)))
-			Ω(config.Index).To(Equal(uint(1)))
-			Ω(config.GoMaxProcs).To(Equal(2))
-			Ω(config.TraceKey).To(Equal("foo"))
-			Ω(config.AccessLog).To(Equal("/tmp/access_log"))
-			Ω(config.EnableSSL).To(Equal(true))
-			Ω(config.SSLPort).To(Equal(uint16(4443)))
+			Expect(config.Port).To(Equal(uint16(8082)))
+			Expect(config.Index).To(Equal(uint(1)))
+			Expect(config.GoMaxProcs).To(Equal(2))
+			Expect(config.TraceKey).To(Equal("foo"))
+			Expect(config.AccessLog).To(Equal("/tmp/access_log"))
+			Expect(config.EnableSSL).To(Equal(true))
+			Expect(config.SSLPort).To(Equal(uint16(4443)))
 		})
 
 		It("sets the Routing Api config", func() {
@@ -143,8 +143,24 @@ routing_api:
 
 			config.Initialize(b)
 
-			Ω(config.RoutingApi.Uri).To(Equal("http://bob.url/token"))
-			Ω(config.RoutingApi.Port).To(Equal(1234))
+			Expect(config.RoutingApi.Uri).To(Equal("http://bob.url/token"))
+			Expect(config.RoutingApi.Port).To(Equal(1234))
+			Expect(config.RoutingApi.AuthDisabled).To(BeFalse())
+		})
+
+		It("sets the Routing Api config with optional values", func() {
+			var b = []byte(`
+routing_api:
+  uri: http://bob.url/token
+  port: 1234
+  auth_disabled: true
+`)
+
+			config.Initialize(b)
+
+			Expect(config.RoutingApi.Uri).To(Equal("http://bob.url/token"))
+			Expect(config.RoutingApi.Port).To(Equal(1234))
+			Expect(config.RoutingApi.AuthDisabled).To(BeTrue())
 		})
 
 		It("sets the OAuth config", func() {
@@ -158,10 +174,40 @@ oauth:
 
 			config.Initialize(b)
 
-			Ω(config.OAuth.TokenEndpoint).To(Equal("http://bob.url/token"))
-			Ω(config.OAuth.ClientName).To(Equal("client-name"))
-			Ω(config.OAuth.ClientSecret).To(Equal("client-secret"))
-			Ω(config.OAuth.Port).To(Equal(1234))
+			Expect(config.OAuth.TokenEndpoint).To(Equal("http://bob.url/token"))
+			Expect(config.OAuth.ClientName).To(Equal("client-name"))
+			Expect(config.OAuth.ClientSecret).To(Equal("client-secret"))
+			Expect(config.OAuth.Port).To(Equal(1234))
+		})
+
+		It("sets the SkipSSLValidation config", func() {
+			var b = []byte(`
+ssl_skip_validation: true
+`)
+			config.Initialize(b)
+			Expect(config.SSLSkipValidation).To(BeTrue())
+		})
+
+		It("defaults the SkipSSLValidation config to false", func() {
+			var b = []byte(``)
+			config.Initialize(b)
+			Expect(config.SSLSkipValidation).To(BeFalse())
+		})
+
+		It("sets the route service secret config", func() {
+			var b = []byte(`
+route_services_secret: super-route-service-secret 
+`)
+			config.Initialize(b)
+			Expect(config.RouteServiceSecret).To(Equal("super-route-service-secret"))
+		})
+
+		It("sets the route service secret decrypt only config", func() {
+			var b = []byte(`
+route_services_secret_decrypt_only: decrypt-only-super-route-service-secret
+`)
+			config.Initialize(b)
+			Expect(config.RouteServiceSecretPrev).To(Equal("decrypt-only-super-route-service-secret"))
 		})
 	})
 
@@ -179,12 +225,12 @@ secure_cookies: true
 			config.Initialize(b)
 			config.Process()
 
-			Ω(config.PublishStartMessageIntervalInSeconds).To(Equal(1))
-			Ω(config.PruneStaleDropletsInterval).To(Equal(2 * time.Second))
-			Ω(config.DropletStaleThreshold).To(Equal(30 * time.Second))
-			Ω(config.PublishActiveAppsInterval).To(Equal(4 * time.Second))
-			Ω(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
-			Ω(config.SecureCookies).To(BeTrue())
+			Expect(config.PublishStartMessageIntervalInSeconds).To(Equal(1))
+			Expect(config.PruneStaleDropletsInterval).To(Equal(2 * time.Second))
+			Expect(config.DropletStaleThreshold).To(Equal(30 * time.Second))
+			Expect(config.PublishActiveAppsInterval).To(Equal(4 * time.Second))
+			Expect(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
+			Expect(config.SecureCookies).To(BeTrue())
 		})
 
 		Context("When StartResponseDelayInterval is greater than DropletStaleThreshold", func() {
@@ -197,8 +243,8 @@ start_response_delay_interval: 15
 				config.Initialize(b)
 				config.Process()
 
-				Ω(config.DropletStaleThreshold).To(Equal(15 * time.Second))
-				Ω(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
+				Expect(config.DropletStaleThreshold).To(Equal(15 * time.Second))
+				Expect(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
 			})
 		})
 
@@ -211,7 +257,7 @@ secure_cookies: false
 				config.Initialize(b)
 				config.Process()
 
-				Ω(config.SecureCookies).To(BeFalse())
+				Expect(config.SecureCookies).To(BeFalse())
 			})
 		})
 
@@ -234,6 +280,77 @@ nats:
 				natsServers := config.NatsServers()
 				Expect(natsServers[0]).To(Equal("nats://user:pass@remotehost:4223"))
 				Expect(natsServers[1]).To(Equal("nats://user2:pass2@remotehost2:4223"))
+			})
+		})
+
+		Describe("RouteServiceEnabled", func() {
+			var configYaml []byte
+			Context("when the route service secrets is not configured", func() {
+				BeforeEach(func() {
+					configYaml = []byte(`other_key: other_value`)
+				})
+				It("disables route services", func() {
+					config.Initialize(configYaml)
+					config.Process()
+					Expect(config.RouteServiceEnabled).To(BeFalse())
+				})
+			})
+
+			Context("when the route service secret is configured", func() {
+				Context("when the route service secret is set", func() {
+					BeforeEach(func() {
+						configYaml = []byte(`
+route_services_secret: my-route-service-secret
+`)
+						config.Initialize(configYaml)
+						config.Process()
+					})
+
+					It("enables route services", func() {
+						Expect(config.RouteServiceEnabled).To(BeTrue())
+					})
+
+					It("sets route service secret", func() {
+						Expect(config.RouteServiceSecret).To(Equal("my-route-service-secret"))
+					})
+				})
+
+				Context("when the route service secret and the decrypt only route service secret are are set", func() {
+					BeforeEach(func() {
+						configYaml = []byte(`
+route_services_secret: my-route-service-secret
+route_services_secret_decrypt_only: my-decrypt-only-route-service-secret
+`)
+						config.Initialize(configYaml)
+						config.Process()
+					})
+
+					It("enables route services", func() {
+						Expect(config.RouteServiceEnabled).To(BeTrue())
+					})
+
+					It("sets route service secret", func() {
+						Expect(config.RouteServiceSecret).To(Equal("my-route-service-secret"))
+					})
+
+					It("sets previous route service secret", func() {
+						Expect(config.RouteServiceSecretPrev).To(Equal("my-decrypt-only-route-service-secret"))
+					})
+				})
+
+				Context("when only the decrypt only route service secret is set", func() {
+					BeforeEach(func() {
+						configYaml = []byte(`
+route_services_secret_decrypt_only: 1PfbARmvIn6cgyKorA1rqR2d34rBOo+z3qJGz17pi8Y=
+`)
+						config.Initialize(configYaml)
+						config.Process()
+					})
+
+					It("does NOT enabled route services", func() {
+						Expect(config.RouteServiceEnabled).To(BeFalse())
+					})
+				})
 			})
 		})
 
@@ -282,17 +399,17 @@ ssl_key_path: ../test/assets/private.pem
 
 				It("Sets the default cipher suites", func() {
 					expectedSuites := []uint16{
+						tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+						tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+						tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+						tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
+						tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+						tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+						tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+						tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
 						tls.TLS_RSA_WITH_RC4_128_SHA,
 						tls.TLS_RSA_WITH_AES_128_CBC_SHA,
 						tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-						tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
-						tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-						tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-						tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-						tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-						tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-						tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-						tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
 					}
 
 					config.Initialize(b)
@@ -358,14 +475,16 @@ cipher_suites: potato
 			It("converts timeouts to a duration", func() {
 				var b = []byte(`
 endpoint_timeout: 10
+route_service_timeout: 10
 drain_timeout: 15
 `)
 
 				config.Initialize(b)
 				config.Process()
 
-				Ω(config.EndpointTimeout).To(Equal(10 * time.Second))
-				Ω(config.DrainTimeout).To(Equal(15 * time.Second))
+				Expect(config.EndpointTimeout).To(Equal(10 * time.Second))
+				Expect(config.RouteServiceTimeout).To(Equal(10 * time.Second))
+				Expect(config.DrainTimeout).To(Equal(15 * time.Second))
 			})
 
 			It("defaults to the EndpointTimeout when not set", func() {
@@ -376,8 +495,8 @@ endpoint_timeout: 10
 				config.Initialize(b)
 				config.Process()
 
-				Ω(config.EndpointTimeout).To(Equal(10 * time.Second))
-				Ω(config.DrainTimeout).To(Equal(10 * time.Second))
+				Expect(config.EndpointTimeout).To(Equal(10 * time.Second))
+				Expect(config.DrainTimeout).To(Equal(10 * time.Second))
 			})
 		})
 	})

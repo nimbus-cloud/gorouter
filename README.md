@@ -1,27 +1,11 @@
-[![Build Status](https://travis-ci.org/cloudfoundry/gorouter.png)](https://travis-ci.org/cloudfoundry/gorouter)
+[![Build Status](https://travis-ci.org/cloudfoundry/gorouter.svg?branch=master)](https://travis-ci.org/cloudfoundry/gorouter)
 
-# gorouter
+# GoRouter
 
 This repository contains the source code for a Go implementation of the Cloud
 Foundry router.
 
 You can find the old router [here](http://github.com/cloudfoundry-attic/router)
-
-## Summary
-
-The original router can be found at cloudfoundry/router. The original router is
-backed by nginx, that uses Lua code to connect to a Ruby server that -- based
-on the headers of a client's request -- will tell nginx which backend it should
-use. The main limitations in this architecture are that nginx does not support
-non-HTTP (e.g. traffic to services) and non-request/response type traffic (e.g.
-to support WebSockets), and that it requires a round trip to a Ruby server for
-every request.
-
-The Go implementation of the Cloud Foundry router is an attempt in solving
-these limitations. First, with full control over every connection to the
-router, it can more easily support WebSockets, and other types of traffic (e.g.
-via HTTP CONNECT). Second, all logic is contained in a single process,
-removing unnecessary latency.
 
 ## Getting started
 
@@ -33,21 +17,39 @@ standalone environment.
 - Go should be installed and in the PATH
 - GOPATH should be set as described in http://golang.org/doc/code.html
 - [gnatsd](https://github.com/apcera/gnatsd) installed and in the PATH
+- [godep](https://github.com/tools/godep) installed and in the PATH
+- Install [direnv](http://direnv.net/) if you are planning to do gorouter
+development as part of cf-release.
 
 ### Development Setup
 
 Download gorouter:
+
+Option 1: GoRouter (standalone)
 ```bash
 go get -d github.com/cloudfoundry/gorouter
 cd $GOPATH/src/github.com/cloudfoundry/gorouter
 ```
 
-To install exactly the dependecies vendored with gorouter, use [godep](https://github.com/tools/godep):
+Option 2: GoRouter (as part of [cf-release](https://github.com/cloudfoundry/cf-release))
+```bash
+git clone https://github.com/cloudfoundry/cf-release
+cd cf-release
+./update
+cd cf-release/src/github.com/cloudfoundry/gorouter
+```
+ *Note: direnv will automatically set your GOPATH when you cd into the gorouter directory. You will need to run `direnv allow` the first time.*
+
+
+To install exactly the dependencies vendored with gorouter, use [godep](https://github.com/tools/godep):
 
 ```bash
 go get -v github.com/tools/godep
 godep restore ./...
 ```
+
+
+
 
 ### Running Tests
 
@@ -155,7 +157,7 @@ The format of the `router.register` message is as follows:
 `private_instance_id` is a unique identifier for an instance associated with the app identified by the `app` field. `X-CF-InstanceID` is set to this value on the request to the endpoint registered.
 
 Such a message can be sent to both the `router.register` subject to register
-URIs, and to the `router.unregister` subject to unregister URIs, respectively. 
+URIs, and to the `router.unregister` subject to unregister URIs, respectively.
 
 ###Example
 
@@ -173,7 +175,7 @@ Published [router.register] : '{"host":"127.0.0.1","port":4567,"uris":["my_first
 
 See that it works!
 ```
-$ curl my_first_url.vcap.me:8080
+$ curl my_first_url.vcap.me:8081
 Hello!
 ```
 
@@ -208,6 +210,8 @@ curl -vvv -A "HTTP-Monitor/1.1" http://127.0.0.1/
 > Accept: */*
 >
 < HTTP/1.1 200 OK
+< Cache-Control: private, max-age=0
+< Expires: 0
 < Date: Mon, 10 Feb 2014 00:55:25 GMT
 < Transfer-Encoding: chunked
 <
@@ -235,6 +239,21 @@ curl -vvv "http://someuser:somepass@127.0.0.1:8080/routes"
 {"0295dd314aaf582f201e655cbd74ade5.cloudfoundry.me":["127.0.0.1:34567"],"03e316d6aa375d1dc1153700da5f1798.cloudfoundry.me":["127.0.0.1:34568"]}
 ```
 
+### Profiling the Server
+
+The GoRouter runs the [cf_debug_server](https://github.com/cloudfoundry-incubator/cf-debug-server), which is a wrapper around the go pprof tool. In order to generate this profile, do the following:
+
+```bash
+# Establish a SSH tunnel to your server (not necessary if you can connect directly)
+ssh -L localhost:8080:[INTERNAL_SERVER_IP]:17001 vcap@[BOSH_DIRECTOR]
+# Run the profile tool.
+go tool pprof http://localhost:8080/debug/pprof/profile
+```
+
+## Load Balancing
+
+The GoRouter is, in simple terms, a reverse proxy that load balances between many backend instances. The implementation currently uses simple round-robin load balancing and will retry a request if the chosen backend does not accept the TCP connection.
+
 ## Logs
 
 The router's logging is specified in its YAML configuration file, in a [steno configuration format](http://github.com/cloudfoundry/steno#from-yaml-file).
@@ -245,6 +264,12 @@ Examples: the router can't bind to its TCP port, a CF component has published in
 * `warn` - An unexpected state has occurred. Examples: the router tried to publish data that could not be encoded as JSON
 * `info`, `debug` - An expected event has occurred. Examples: a new CF component was registered with the router, the router has begun
 to prune routes for stale droplets.
+
+Access logs provide information for the following fields when recieving a request:
+
+`<Request Host> - [<Start Date>] "<Request Method> <Request URL> <Request Protocol>" <Status Code> <Bytes Received> <Bytes Sent> "<Referer>" "<User-Agent>" <Remote Address> x_forwarded_for:"<X-Forwarded-For>" x_forwarded_proto:"<X-Forwarded-Proto>" vcap_request_id:<X-Vcap-Request-ID> response_time:<Response Time> app_id:<Application ID> <Extra Headers>`
+* Status Code, Response Time, Application ID, and Extra Headers are all optional fields
+* The absence of Status Code, Response Time or Application ID will result in a "-" in the corresponding field
 
 ## Contributing
 

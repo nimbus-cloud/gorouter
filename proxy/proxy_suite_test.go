@@ -1,23 +1,26 @@
 package proxy_test
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/dropsonde/emitter/fake"
 	"github.com/cloudfoundry/gorouter/access_log"
+	"github.com/cloudfoundry/gorouter/common/secure"
 	"github.com/cloudfoundry/gorouter/config"
 	"github.com/cloudfoundry/gorouter/proxy"
 	"github.com/cloudfoundry/gorouter/registry"
 	"github.com/cloudfoundry/gorouter/test_util"
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
 	"testing"
 	"time"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+	"github.com/cloudfoundry/gorouter/metrics/fakes"
 )
 
 var (
@@ -27,6 +30,8 @@ var (
 	proxyServer   net.Listener
 	accessLog     access_log.AccessLogger
 	accessLogFile *test_util.FakeFile
+	crypto        secure.Crypto
+	cryptoPrev    secure.Crypto
 )
 
 func TestProxy(t *testing.T) {
@@ -35,14 +40,22 @@ func TestProxy(t *testing.T) {
 }
 
 var _ = BeforeEach(func() {
+	var err error
+
+	crypto, err = secure.NewAesGCM([]byte("ABCDEFGHIJKLMNOP"))
+	Expect(err).NotTo(HaveOccurred())
+
+	cryptoPrev = nil
+
 	conf = config.DefaultConfig()
 	conf.TraceKey = "my_trace_key"
 	conf.EndpointTimeout = 500 * time.Millisecond
 })
 
 var _ = JustBeforeEach(func() {
+	var err error
 	mbus := fakeyagnats.Connect()
-	r = registry.NewRouteRegistry(conf, mbus)
+	r = registry.NewRouteRegistry(conf, mbus, new(fakes.FakeRouteReporter))
 
 	fakeEmitter := fake.NewFakeEventEmitter("fake")
 	dropsonde.InitializeWithEmitter(fakeEmitter)
@@ -51,23 +64,34 @@ var _ = JustBeforeEach(func() {
 	accessLog = access_log.NewFileAndLoggregatorAccessLogger(accessLogFile, "")
 	go accessLog.Run()
 
+	conf.EnableSSL = true
+	conf.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_256_CBC_SHA}
+
+	tlsConfig := &tls.Config{
+		CipherSuites:       conf.CipherSuites,
+		InsecureSkipVerify: conf.SSLSkipValidation,
+	}
+
 	p = proxy.NewProxy(proxy.ProxyArgs{
-		EndpointTimeout: conf.EndpointTimeout,
-		Ip:              conf.Ip,
-		TraceKey:        conf.TraceKey,
-		Registry:        r,
-		Reporter:        nullVarz{},
-		AccessLogger:    accessLog,
-		SecureCookies:   conf.SecureCookies,
+		EndpointTimeout:     conf.EndpointTimeout,
+		Ip:                  conf.Ip,
+		TraceKey:            conf.TraceKey,
+		Registry:            r,
+		Reporter:            nullVarz{},
+		AccessLogger:        accessLog,
+		SecureCookies:       conf.SecureCookies,
+		TLSConfig:           tlsConfig,
+		RouteServiceEnabled: conf.RouteServiceEnabled,
+		RouteServiceTimeout: conf.RouteServiceTimeout,
+		Crypto:              crypto,
+		CryptoPrev:          cryptoPrev,
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	Ω(err).NotTo(HaveOccurred())
+	proxyServer, err = net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
 
 	server := http.Server{Handler: p}
-	go server.Serve(ln)
-
-	proxyServer = ln
+	go server.Serve(proxyServer)
 })
 
 var _ = AfterEach(func() {
@@ -86,10 +110,9 @@ func shouldEcho(input string, expected string) {
 
 	x := dialProxy(proxyServer)
 
-	req := test_util.NewRequest("GET", input, nil)
-	req.Host = "encoding"
+	req := test_util.NewRequest("GET", "encoding", input, nil)
 	x.WriteRequest(req)
 	resp, _ := x.ReadResponse()
 
-	Ω(resp.StatusCode).To(Equal(http.StatusOK))
+	Expect(resp.StatusCode).To(Equal(http.StatusOK))
 }

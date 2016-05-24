@@ -74,11 +74,12 @@ var _ = Describe("RouteFetcher", func() {
 					LogGuid: "guid",
 				},
 				{
-					Route:   "foo",
-					Port:    2,
-					IP:      "2.2.2.2",
-					TTL:     1,
-					LogGuid: "guid",
+					Route:           "foo",
+					Port:            2,
+					IP:              "2.2.2.2",
+					TTL:             1,
+					LogGuid:         "guid",
+					RouteServiceUrl: "route-service-url",
 				},
 				{
 					Route:   "bar",
@@ -100,10 +101,17 @@ var _ = Describe("RouteFetcher", func() {
 			Expect(registry.RegisterCallCount()).To(Equal(3))
 
 			for i := 0; i < 3; i++ {
-				response := response[i]
+				expectedRoute := response[i]
 				uri, endpoint := registry.RegisterArgsForCall(i)
-				Expect(uri).To(Equal(route.Uri(response.Route)))
-				Expect(endpoint).To(Equal(route.NewEndpoint(response.LogGuid, response.IP, uint16(response.Port), response.LogGuid, nil, response.TTL)))
+				Expect(uri).To(Equal(route.Uri(expectedRoute.Route)))
+				Expect(endpoint).To(Equal(
+					route.NewEndpoint(expectedRoute.LogGuid,
+						expectedRoute.IP, uint16(expectedRoute.Port),
+						expectedRoute.LogGuid,
+						nil,
+						expectedRoute.TTL,
+						expectedRoute.RouteServiceUrl,
+					)))
 			}
 		})
 
@@ -125,11 +133,24 @@ var _ = Describe("RouteFetcher", func() {
 			Expect(registry.RegisterCallCount()).To(Equal(4))
 			Expect(registry.UnregisterCallCount()).To(Equal(2))
 
+			expectedUnregisteredRoutes := []db.Route{
+				response[1],
+				response[2],
+			}
+
 			for i := 0; i < 2; i++ {
-				response := response[i+1]
+				expectedRoute := expectedUnregisteredRoutes[i]
 				uri, endpoint := registry.UnregisterArgsForCall(i)
-				Expect(uri).To(Equal(route.Uri(response.Route)))
-				Expect(endpoint).To(Equal(route.NewEndpoint(response.LogGuid, response.IP, uint16(response.Port), response.LogGuid, nil, response.TTL)))
+				Expect(uri).To(Equal(route.Uri(expectedRoute.Route)))
+				Expect(endpoint).To(Equal(
+					route.NewEndpoint(expectedRoute.LogGuid,
+						expectedRoute.IP,
+						uint16(expectedRoute.Port),
+						expectedRoute.LogGuid,
+						nil,
+						expectedRoute.TTL,
+						expectedRoute.RouteServiceUrl,
+					)))
 			}
 		})
 
@@ -195,20 +216,19 @@ var _ = Describe("RouteFetcher", func() {
 	Describe(".StartEventCycle", func() {
 		Context("when fetching the auth token fails", func() {
 			It("logs the failure and tries again", func() {
-				received := make(chan struct{})
-
 				tokenFetcher.FetchTokenStub = func() (*token_fetcher.Token, error) {
-					received <- struct{}{}
 					return nil, errors.New("failed to get the token")
 				}
 				fetcher.StartEventCycle()
 
-				Eventually(received).Should(Receive())
-				Eventually(received).Should(Receive())
-
-				Expect(sink.Records()).ToNot(BeNil())
-				Expect(sink.Records()[0].Message).To(Equal("failed to get the token"))
-				Expect(tokenFetcher.FetchTokenCallCount()).To(Equal(2))
+				Eventually(func() string {
+					if len(sink.Records()) > 0 {
+						return sink.Records()[0].Message
+					} else {
+						return ""
+					}
+				}).Should(Equal("failed to get the token"))
+				Eventually(tokenFetcher.FetchTokenCallCount).Should(BeNumerically(">=", 2))
 			})
 		})
 
@@ -217,18 +237,16 @@ var _ = Describe("RouteFetcher", func() {
 				eventSource := fake_routing_api.FakeEventSource{}
 				client.SubscribeToEventsReturns(&eventSource, nil)
 
-				received := make(chan struct{})
-
 				eventSource.NextStub = func() (routing_api.Event, error) {
-					received <- struct{}{}
 					event := routing_api.Event{
 						Action: "Delete",
 						Route: db.Route{
-							Route:   "z.a.k",
-							Port:    63,
-							IP:      "42.42.42.42",
-							TTL:     1,
-							LogGuid: "Tomato",
+							Route:           "z.a.k",
+							Port:            63,
+							IP:              "42.42.42.42",
+							TTL:             1,
+							LogGuid:         "Tomato",
+							RouteServiceUrl: "route-service-url",
 						}}
 					return event, nil
 				}
@@ -236,42 +254,36 @@ var _ = Describe("RouteFetcher", func() {
 				tokenFetcher.FetchTokenReturns(token, nil)
 				fetcher.StartEventCycle()
 
-				<-received
-
-				Expect(registry.UnregisterCallCount()).To(Equal(1))
-				Expect(client.SubscribeToEventsCallCount()).To(Equal(1))
+				Eventually(registry.UnregisterCallCount).Should(BeNumerically(">=", 1))
+				Eventually(client.SubscribeToEventsCallCount).Should(Equal(1))
 			})
 
 			It("responds to errors, and retries subscribing", func() {
 				eventSource := fake_routing_api.FakeEventSource{}
 				client.SubscribeToEventsReturns(&eventSource, nil)
 
-				received := make(chan struct{})
-
 				eventSource.NextStub = func() (routing_api.Event, error) {
-					received <- struct{}{}
 					return routing_api.Event{}, errors.New("beep boop im a robot")
 				}
 
 				tokenFetcher.FetchTokenReturns(token, nil)
 				fetcher.StartEventCycle()
 
-				<-received
-
-				Expect(sink.Records()).ToNot(BeNil())
-				Expect(sink.Records()[1].Message).To(Equal("beep boop im a robot"))
-				Eventually(func() int {
-					return tokenFetcher.FetchTokenCallCount()
-				}, 1).Should(BeNumerically(">=", 2))
-				Expect(eventSource.CloseCallCount()).To(Equal(1))
+				Eventually(func() string {
+					if len(sink.Records()) > 1 {
+						return sink.Records()[1].Message
+					} else {
+						return ""
+					}
+				}).Should(Equal("beep boop im a robot"))
+				Eventually(tokenFetcher.FetchTokenCallCount).Should(BeNumerically(">=", 2))
+				Eventually(eventSource.CloseCallCount).Should(BeNumerically(">=", 2))
 			})
 		})
 
 		Context("and the event source fails to subscribe", func() {
 			It("logs the error and tries again", func() {
-				subscribed := make(chan struct{})
 				client.SubscribeToEventsStub = func() (routing_api.EventSource, error) {
-					subscribed <- struct{}{}
 					err := errors.New("i failed to subscribe")
 					return &fake_routing_api.FakeEventSource{}, err
 				}
@@ -279,10 +291,13 @@ var _ = Describe("RouteFetcher", func() {
 				tokenFetcher.FetchTokenReturns(token, nil)
 				fetcher.StartEventCycle()
 
-				<-subscribed
-
-				Expect(sink.Records()).ToNot(BeNil())
-				Expect(sink.Records()[0].Message).To(Equal("i failed to subscribe"))
+				Eventually(func() string {
+					if len(sink.Records()) > 0 {
+						return sink.Records()[0].Message
+					} else {
+						return ""
+					}
+				}).Should(Equal("i failed to subscribe"))
 			})
 		})
 	})
@@ -291,11 +306,12 @@ var _ = Describe("RouteFetcher", func() {
 		Context("When the event is an Upsert", func() {
 			It("registers the route from the registry", func() {
 				eventRoute := db.Route{
-					Route:   "z.a.k",
-					Port:    63,
-					IP:      "42.42.42.42",
-					TTL:     1,
-					LogGuid: "Tomato",
+					Route:           "z.a.k",
+					Port:            63,
+					IP:              "42.42.42.42",
+					TTL:             1,
+					LogGuid:         "Tomato",
+					RouteServiceUrl: "route-service-url",
 				}
 
 				event := routing_api.Event{
@@ -315,6 +331,7 @@ var _ = Describe("RouteFetcher", func() {
 						eventRoute.LogGuid,
 						nil,
 						eventRoute.TTL,
+						eventRoute.RouteServiceUrl,
 					)))
 			})
 		})
@@ -322,11 +339,12 @@ var _ = Describe("RouteFetcher", func() {
 		Context("When the event is a DELETE", func() {
 			It("unregisters the route from the registry", func() {
 				eventRoute := db.Route{
-					Route:   "z.a.k",
-					Port:    63,
-					IP:      "42.42.42.42",
-					TTL:     1,
-					LogGuid: "Tomato",
+					Route:           "z.a.k",
+					Port:            63,
+					IP:              "42.42.42.42",
+					TTL:             1,
+					LogGuid:         "Tomato",
+					RouteServiceUrl: "route-service-url",
 				}
 
 				event := routing_api.Event{
@@ -346,6 +364,7 @@ var _ = Describe("RouteFetcher", func() {
 						eventRoute.LogGuid,
 						nil,
 						eventRoute.TTL,
+						eventRoute.RouteServiceUrl,
 					)))
 			})
 		})

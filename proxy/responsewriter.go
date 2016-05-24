@@ -1,8 +1,22 @@
 package proxy
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"net/http"
 )
+
+type ProxyResponseWriter interface {
+	Header() http.Header
+	Hijack() (net.Conn, *bufio.ReadWriter, error)
+	Write(b []byte) (int, error)
+	WriteHeader(s int)
+	Done()
+	Flush()
+	Status() int
+	Size() int
+}
 
 type proxyResponseWriter struct {
 	w      http.ResponseWriter
@@ -13,7 +27,7 @@ type proxyResponseWriter struct {
 	done    bool
 }
 
-func newProxyResponseWriter(w http.ResponseWriter) *proxyResponseWriter {
+func NewProxyResponseWriter(w http.ResponseWriter) *proxyResponseWriter {
 	proxyWriter := &proxyResponseWriter{
 		w:       w,
 		flusher: w.(http.Flusher),
@@ -24,6 +38,14 @@ func newProxyResponseWriter(w http.ResponseWriter) *proxyResponseWriter {
 
 func (p *proxyResponseWriter) Header() http.Header {
 	return p.w.Header()
+}
+
+func (p *proxyResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := p.w.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer cannot hijack")
+	}
+	return hijacker.Hijack()
 }
 
 func (p *proxyResponseWriter) Write(b []byte) (int, error) {

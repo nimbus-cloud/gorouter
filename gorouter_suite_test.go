@@ -1,6 +1,8 @@
 package main_test
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
@@ -17,8 +19,12 @@ func TestGorouter(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	path, err := gexec.Build("github.com/cloudfoundry/gorouter", "-race")
-	Ω(err).ShouldNot(HaveOccurred())
+	Expect(err).ToNot(HaveOccurred())
 	gorouterPath = path
+	SetDefaultEventuallyTimeout(15 * time.Second)
+	SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
+	SetDefaultConsistentlyDuration(1 * time.Second)
+	SetDefaultConsistentlyPollingInterval(10 * time.Millisecond)
 })
 
 var _ = AfterSuite(func() {

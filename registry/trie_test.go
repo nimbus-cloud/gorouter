@@ -20,7 +20,7 @@ var _ = Describe("Trie", func() {
 
 	Describe(".Find", func() {
 		It("works for the root node", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/", p)
 			node, ok := r.Find("/")
 			Expect(node).To(Equal(p))
@@ -28,7 +28,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("finds an exact match to an existing key", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar", p)
 			node, ok := r.Find("/foo/bar")
 			Expect(node).To(Equal(p))
@@ -36,7 +36,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("returns nil when no exact match is found", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p)
 			node, ok := r.Find("/foo/bar")
 			Expect(node).To(BeNil())
@@ -44,7 +44,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("returns nil if a shorter path exists", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar", p)
 			node, ok := r.Find("/foo/bar/baz")
 			Expect(node).To(BeNil())
@@ -54,7 +54,7 @@ var _ = Describe("Trie", func() {
 
 	Describe(".MatchUri", func() {
 		It("works for the root node", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/", p)
 			node, ok := r.MatchUri("/")
 			Expect(node).To(Equal(p))
@@ -62,7 +62,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("finds a existing key", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar", p)
 			node, ok := r.MatchUri("/foo/bar")
 			Expect(node).To(Equal(p))
@@ -70,7 +70,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("finds a matching shorter key", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar", p)
 			node, ok := r.MatchUri("/foo/bar/baz")
 			Expect(node).To(Equal(p))
@@ -78,7 +78,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("returns nil when no match found", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p)
 			node, ok := r.MatchUri("/foo/bar")
 			Expect(node).To(BeNil())
@@ -86,8 +86,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("returns the longest found match when routes overlap", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo", p1)
 			r.Insert("/foo/bar/baz", p2)
 			node, ok := r.MatchUri("/foo/bar")
@@ -96,8 +96,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("returns the longest found match when routes overlap and longer path created first", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p2)
 			r.Insert("/foo", p1)
 			node, ok := r.MatchUri("/foo/bar")
@@ -108,7 +108,7 @@ var _ = Describe("Trie", func() {
 
 	Describe(".Insert", func() {
 		It("adds a non-existing key", func() {
-			p := route.NewPool(0, nil)
+			p := route.NewPool(0, "", nil)
 			childBar := r.Insert("/foo/bar", p)
 
 			trie0 := r
@@ -126,8 +126,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("adds a child node", func() {
-			rootPool := route.NewPool(0, nil)
-			childPool := route.NewPool(0, nil)
+			rootPool := route.NewPool(0, "", nil)
+			childPool := route.NewPool(0, "", nil)
 
 			_ = r.Insert("example", rootPool)
 
@@ -144,8 +144,8 @@ var _ = Describe("Trie", func() {
 
 	Describe(".Delete", func() {
 		It("removes a pool", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo", p1)
 			r.Insert("/foo/bar", p2)
 
@@ -158,7 +158,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("cleans up the node", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo", p)
 
 			r.Delete("/foo")
@@ -166,7 +166,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("cleans up parent nodes", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("example.com/foo/bar/baz", p)
 
 			r.Delete("example.com/foo/bar/baz")
@@ -174,8 +174,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("does not prune nodes with other children", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p1)
 			r.Insert("/foo/something/baz", p2)
 
@@ -185,8 +185,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("does not prune nodes with pools", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p1)
 			r.Insert("/foo/bar", p2)
 
@@ -196,8 +196,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("Returns the number of pools after deleting one", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p1)
 			r.Insert("/foo/bar", p2)
 
@@ -206,8 +206,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("removes a pool", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo", p1)
 			r.Insert("/foo/bar", p2)
 
@@ -220,7 +220,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("cleans up the node", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo", p)
 
 			r.Delete("/foo")
@@ -228,7 +228,7 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("cleans up parent nodes", func() {
-			p := route.NewPool(42, nil)
+			p := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p)
 
 			r.Delete("/foo/bar/baz")
@@ -236,8 +236,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("does not prune nodes with other children", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p1)
 			r.Insert("/foo/something/baz", p2)
 
@@ -247,8 +247,8 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("does not prune nodes with pools", func() {
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			r.Insert("/foo/bar/baz", p1)
 			r.Insert("/foo/bar", p2)
 
@@ -261,8 +261,8 @@ var _ = Describe("Trie", func() {
 	It("Returns the number of pools", func() {
 		Expect(r.PoolCount()).To(Equal(0))
 
-		p1 := route.NewPool(42, nil)
-		p2 := route.NewPool(42, nil)
+		p1 := route.NewPool(42, "", nil)
+		p2 := route.NewPool(42, "", nil)
 		r.Insert("/foo/bar/baz", p1)
 		r.Insert("/foo/bar", p2)
 
@@ -278,12 +278,12 @@ var _ = Describe("Trie", func() {
 				count += 1
 			}
 
-			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1)
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
-			p3 := route.NewPool(42, nil)
-			p4 := route.NewPool(42, nil)
+			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1, "")
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
+			p3 := route.NewPool(42, "", nil)
+			p4 := route.NewPool(42, "", nil)
 			p1.Put(e1)
 			p2.Put(e2)
 			r.Insert("/foo", p1)
@@ -306,9 +306,9 @@ var _ = Describe("Trie", func() {
 
 	Describe(".Snip", func() {
 		It("removes a branch from the trie", func() {
-			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			p1.Put(e1)
 
 			fooNode := r.Insert("/foo", p1)
@@ -333,9 +333,9 @@ var _ = Describe("Trie", func() {
 		It("returns the number of endpoints", func() {
 			Expect(r.EndpointCount()).To(Equal(0))
 
-			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1)
-			p := route.NewPool(42, nil)
+			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1, "")
+			p := route.NewPool(42, "", nil)
 			p.Put(e1)
 			p.Put(e2)
 			r.Insert("/foo/bar", p)
@@ -344,10 +344,10 @@ var _ = Describe("Trie", func() {
 		})
 
 		It("counts the uniques leaf endpoints", func() {
-			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			e2 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			e2 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			p1.Put(e1)
 			p2.Put(e2)
 			r.Insert("/foo", p1)
@@ -359,10 +359,10 @@ var _ = Describe("Trie", func() {
 
 	Describe(".ToMap", func() {
 		It("Can be represented by a map", func() {
-			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1)
-			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1)
-			p1 := route.NewPool(42, nil)
-			p2 := route.NewPool(42, nil)
+			e1 := route.NewEndpoint("", "192.168.1.1", 1234, "", nil, -1, "")
+			e2 := route.NewEndpoint("", "192.168.1.1", 4321, "", nil, -1, "")
+			p1 := route.NewPool(42, "", nil)
+			p2 := route.NewPool(42, "", nil)
 			p1.Put(e1)
 			p2.Put(e2)
 			r.Insert("/foo", p1)
@@ -377,8 +377,8 @@ var _ = Describe("Trie", func() {
 	})
 
 	It("applies a function to each node with a pool", func() {
-		p1 := route.NewPool(42, nil)
-		p2 := route.NewPool(42, nil)
+		p1 := route.NewPool(42, "", nil)
+		p2 := route.NewPool(42, "", nil)
 		r.Insert("/foo", p1)
 		r.Insert("/foo/bar/baz", p2)
 

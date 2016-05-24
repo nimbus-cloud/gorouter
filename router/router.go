@@ -60,23 +60,24 @@ func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r
 	varz := &vcap.Varz{
 		UniqueVarz: v,
 		GenericVarz: vcap.GenericVarz{
-			LogCounts: logCounter,
+			Type:        "Router",
+			Index:       cfg.Index,
+			Host:        host,
+			Credentials: []string{cfg.Status.User, cfg.Status.Pass},
+			LogCounts:   logCounter,
 		},
 	}
 
 	healthz := &vcap.Healthz{}
 
 	component := &vcap.VcapComponent{
-		Type:        "Router",
-		Index:       cfg.Index,
-		Host:        host,
-		Credentials: []string{cfg.Status.User, cfg.Status.Pass},
-		Config:      cfg,
-		Varz:        varz,
-		Healthz:     healthz,
+		Config:  cfg,
+		Varz:    varz,
+		Healthz: healthz,
 		InfoRoutes: map[string]json.Marshaler{
 			"/routes": r,
 		},
+		Logger: steno.NewLogger("common.logger"),
 	}
 
 	router := &Router{
@@ -253,7 +254,7 @@ func (r *Router) RegisterComponent() {
 }
 
 func (r *Router) SubscribeRegister() {
-	r.subscribeRegistry("router.register", func(registryMessage *registryMessage) {
+	r.subscribeRegistry("router.register", func(registryMessage *RegistryMessage) {
 		r.logger.Debugf("Got router.register: %v", registryMessage)
 
 		for _, uri := range registryMessage.Uris {
@@ -266,7 +267,7 @@ func (r *Router) SubscribeRegister() {
 }
 
 func (r *Router) SubscribeUnregister() {
-	r.subscribeRegistry("router.unregister", func(registryMessage *registryMessage) {
+	r.subscribeRegistry("router.unregister", func(registryMessage *RegistryMessage) {
 		r.logger.Debugf("Got router.unregister: %v", registryMessage)
 
 		for _, uri := range registryMessage.Uris {
@@ -280,6 +281,11 @@ func (r *Router) SubscribeUnregister() {
 
 func (r *Router) HandleGreetings() {
 	r.mbusClient.Subscribe("router.greet", func(msg *nats.Msg) {
+		if msg.Reply == "" {
+			r.logger.Warnf("Received message with empty reply on subject %s", msg.Subject)
+			return
+		}
+
 		response, _ := r.greetMessage()
 		r.mbusClient.Publish(msg.Reply, response)
 	})
@@ -384,7 +390,7 @@ func (r *Router) greetMessage() ([]byte, error) {
 	}
 
 	d := vcap.RouterStart{
-		Id:    r.component.UUID,
+		Id:    r.component.Varz.UUID,
 		Hosts: []string{host},
 		MinimumRegisterIntervalInSeconds: r.config.StartResponseDelayIntervalInSeconds,
 		PruneThresholdInSeconds:          r.config.DropletStaleThresholdInSeconds,
@@ -393,20 +399,27 @@ func (r *Router) greetMessage() ([]byte, error) {
 	return json.Marshal(d)
 }
 
-func (r *Router) subscribeRegistry(subject string, successCallback func(*registryMessage)) {
+func (r *Router) subscribeRegistry(subject string, successCallback func(*RegistryMessage)) {
 	callback := func(message *nats.Msg) {
 		payload := message.Data
 
-		var msg registryMessage
+		var msg RegistryMessage
 
 		err := json.Unmarshal(payload, &msg)
 		if err != nil {
 			logMessage := fmt.Sprintf("%s: Error unmarshalling JSON (%d; %s): %s", subject, len(payload), payload, err)
 			r.logger.Warnd(map[string]interface{}{"payload": string(payload)}, logMessage)
+			return
 		}
 
 		logMessage := fmt.Sprintf("%s: Received message", subject)
 		r.logger.Debugd(map[string]interface{}{"message": msg}, logMessage)
+
+		if !msg.ValidateMessage() {
+			logMessage := fmt.Sprintf("%s: Unable to validate message. route_service_url must be https", subject)
+			r.logger.Warnd(map[string]interface{}{"message": msg}, logMessage)
+			return
+		}
 
 		successCallback(&msg)
 	}

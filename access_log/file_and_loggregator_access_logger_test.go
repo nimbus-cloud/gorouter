@@ -45,7 +45,7 @@ var _ = Describe("AccessLog", func() {
 
 			accessLogger := NewFileAndLoggregatorAccessLogger(nil, "43")
 
-			routeEndpoint := route.NewEndpoint("", "127.0.0.1", 4567, "", nil, -1)
+			routeEndpoint := route.NewEndpoint("", "127.0.0.1", 4567, "", nil, -1, "")
 
 			accessLogRecord := CreateAccessLogRecord()
 			accessLogRecord.RouteEndpoint = routeEndpoint
@@ -72,22 +72,23 @@ var _ = Describe("AccessLog", func() {
 				n, _ := fakeFile.Read(&payload)
 				return n
 			}).ShouldNot(Equal(0))
-			Ω(string(payload)).To(MatchRegexp("^.*foo.bar.*\n"))
+			Expect(string(payload)).To(MatchRegexp("^.*foo.bar.*\n"))
 
 			accessLogger.Stop()
 		})
 	})
 
 	Measure("Log write speed", func(b Benchmarker) {
-		r := CreateAccessLogRecord()
 		w := nullWriter{}
 
 		b.Time("writeTime", func() {
-			for i := 0; i < 100; i++ {
+			for i := 0; i < 500; i++ {
+				r := CreateAccessLogRecord()
+				r.WriteTo(w)
 				r.WriteTo(w)
 			}
 		})
-	}, 100)
+	}, 500)
 })
 
 func CreateAccessLogRecord() *AccessLogRecord {
@@ -112,7 +113,7 @@ func CreateAccessLogRecord() *AccessLogRecord {
 		StatusCode: http.StatusOK,
 	}
 
-	b := route.NewEndpoint("my_awesome_id", "127.0.0.1", 4567, "", nil, -1)
+	b := route.NewEndpoint("my_awesome_id", "127.0.0.1", 4567, "", nil, -1, "")
 
 	r := AccessLogRecord{
 		Request:       req,

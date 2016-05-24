@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,23 +15,24 @@ import (
 	router_http "github.com/cloudfoundry/gorouter/common/http"
 	"github.com/cloudfoundry/gorouter/route"
 	steno "github.com/cloudfoundry/gosteno"
+"github.com/cloudfoundry/gorouter/metrics"
 )
 
 type RequestHandler struct {
-	logger    *steno.Logger
-	reporter  ProxyReporter
-	logrecord *access_log.AccessLogRecord
+	StenoLogger *steno.Logger
+	reporter    metrics.ProxyReporter
+	logrecord   *access_log.AccessLogRecord
 
 	request  *http.Request
-	response http.ResponseWriter
+	response ProxyResponseWriter
 }
 
-func NewRequestHandler(request *http.Request, response http.ResponseWriter, r ProxyReporter,
+func NewRequestHandler(request *http.Request, response ProxyResponseWriter, r metrics.ProxyReporter,
 	alr *access_log.AccessLogRecord) RequestHandler {
 	return RequestHandler{
-		logger:    createLogger(request),
-		reporter:  r,
-		logrecord: alr,
+		StenoLogger: createLogger(request),
+		reporter:    r,
+		logrecord:   alr,
 
 		request:  request,
 		response: response,
@@ -52,10 +52,12 @@ func createLogger(request *http.Request) *steno.Logger {
 }
 
 func (h *RequestHandler) Logger() *steno.Logger {
-	return h.logger
+	return h.StenoLogger
 }
 
 func (h *RequestHandler) HandleHeartbeat() {
+	h.response.Header().Set("Cache-Control", "private, max-age=0")
+	h.response.Header().Set("Expires", "0")
 	h.logrecord.StatusCode = http.StatusOK
 	h.response.WriteHeader(http.StatusOK)
 	h.response.Write([]byte("ok\n"))
@@ -77,7 +79,7 @@ func (h *RequestHandler) HandleUnsupportedProtocol() {
 }
 
 func (h *RequestHandler) HandleMissingRoute() {
-	h.logger.Warnf("proxy.endpoint.not-found")
+	h.StenoLogger.Warnf("proxy.endpoint.not-found")
 
 	h.response.Header().Set("X-Cf-RouterError", "unknown_route")
 	message := fmt.Sprintf("Requested route ('%s') does not exist.", h.request.Host)
@@ -85,15 +87,40 @@ func (h *RequestHandler) HandleMissingRoute() {
 }
 
 func (h *RequestHandler) HandleBadGateway(err error) {
-	h.logger.Set("Error", err.Error())
-	h.logger.Warnf("proxy.endpoint.failed")
+	h.StenoLogger.Set("Error", err.Error())
+	h.StenoLogger.Warnf("proxy.endpoint.failed")
 
 	h.response.Header().Set("X-Cf-RouterError", "endpoint_failure")
 	h.writeStatus(http.StatusBadGateway, "Registered endpoint failed to handle the request.")
+	h.response.Done()
+}
+
+func (h *RequestHandler) HandleBadSignature(err error) {
+	h.StenoLogger.Set("Error", err.Error())
+	h.StenoLogger.Warnf("proxy.signature.validation.failed")
+
+	h.writeStatus(http.StatusBadRequest, "Failed to validate Route Service Signature")
+	h.response.Done()
+}
+
+func (h *RequestHandler) HandleRouteServiceFailure(err error) {
+	h.StenoLogger.Set("Error", err.Error())
+	h.StenoLogger.Warnf("proxy.route-service.failed")
+
+	h.writeStatus(http.StatusInternalServerError, "Route service request failed.")
+	h.response.Done()
+}
+
+func (h *RequestHandler) HandleUnsupportedRouteService() {
+	h.StenoLogger.Warnf("proxy.route-service.unsupported")
+
+	h.response.Header().Set("X-Cf-RouterError", "route_service_unsupported")
+	h.writeStatus(http.StatusBadGateway, "Support for route services is disabled.")
+	h.response.Done()
 }
 
 func (h *RequestHandler) HandleTcpRequest(iter route.EndpointIterator) {
-	h.logger.Set("Upgrade", "tcp")
+	h.StenoLogger.Set("Upgrade", "tcp")
 
 	h.logrecord.StatusCode = http.StatusSwitchingProtocols
 
@@ -104,7 +131,7 @@ func (h *RequestHandler) HandleTcpRequest(iter route.EndpointIterator) {
 }
 
 func (h *RequestHandler) HandleWebSocketRequest(iter route.EndpointIterator) {
-	h.logger.Set("Upgrade", "websocket")
+	h.StenoLogger.Set("Upgrade", "websocket")
 
 	h.logrecord.StatusCode = http.StatusSwitchingProtocols
 
@@ -117,7 +144,7 @@ func (h *RequestHandler) HandleWebSocketRequest(iter route.EndpointIterator) {
 func (h *RequestHandler) writeStatus(code int, message string) {
 	body := fmt.Sprintf("%d %s: %s", code, http.StatusText(code), message)
 
-	h.logger.Warn(body)
+	h.StenoLogger.Warn(body)
 	h.logrecord.StatusCode = code
 
 	http.Error(h.response, body, code)
@@ -159,11 +186,11 @@ func (h *RequestHandler) serveTcp(iter route.EndpointIterator) error {
 
 		iter.EndpointFailed()
 
-		h.logger.Set("Error", err.Error())
-		h.logger.Warn("proxy.tcp.failed")
+		h.StenoLogger.Set("Error", err.Error())
+		h.StenoLogger.Warn("proxy.tcp.failed")
 
 		retry++
-		if retry == retries {
+		if retry == maxRetries {
 			return err
 		}
 	}
@@ -209,11 +236,11 @@ func (h *RequestHandler) serveWebSocket(iter route.EndpointIterator) error {
 
 		iter.EndpointFailed()
 
-		h.logger.Set("Error", err.Error())
-		h.logger.Warn("proxy.websocket.failed")
+		h.StenoLogger.Set("Error", err.Error())
+		h.StenoLogger.Warn("proxy.websocket.failed")
 
 		retry++
-		if retry == retries {
+		if retry == maxRetries {
 			return err
 		}
 	}
@@ -233,7 +260,7 @@ func (h *RequestHandler) setupRequest(endpoint *route.Endpoint) {
 	h.setRequestURL(endpoint.CanonicalAddr())
 	h.setRequestXForwardedFor()
 	setRequestXRequestStart(h.request)
-	setRequestXVcapRequestId(h.request, h.logger)
+	setRequestXVcapRequestId(h.request, h.StenoLogger)
 }
 
 func (h *RequestHandler) setRequestURL(addr string) {
@@ -279,12 +306,7 @@ func setRequestXCfInstanceId(request *http.Request, endpoint *route.Endpoint) {
 }
 
 func (h *RequestHandler) hijack() (client net.Conn, io *bufio.ReadWriter, err error) {
-	hijacker, ok := h.response.(http.Hijacker)
-	if !ok {
-		return nil, nil, errors.New("response writer cannot hijack")
-	}
-
-	return hijacker.Hijack()
+	return h.response.Hijack()
 }
 
 func forwardIO(a, b net.Conn) {

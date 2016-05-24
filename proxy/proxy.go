@@ -1,25 +1,30 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/gorouter/access_log"
 	router_http "github.com/cloudfoundry/gorouter/common/http"
+	"github.com/cloudfoundry/gorouter/common/secure"
 	"github.com/cloudfoundry/gorouter/route"
+	"github.com/cloudfoundry/gorouter/route_service"
 	steno "github.com/cloudfoundry/gosteno"
+	"github.com/cloudfoundry/gorouter/metrics"
 )
 
 const (
 	VcapCookieId    = "__VCAP_ID__"
 	StickyCookieKey = "JSESSIONID"
-	retries         = 3
+	maxRetries      = 3
 )
 
 var noEndpointsAvailable = errors.New("No endpoints available")
@@ -30,39 +35,42 @@ type LookupRegistry interface {
 
 type AfterRoundTrip func(rsp *http.Response, endpoint *route.Endpoint, err error)
 
-type ProxyReporter interface {
-	CaptureBadRequest(req *http.Request)
-	CaptureBadGateway(req *http.Request)
-	CaptureRoutingRequest(b *route.Endpoint, req *http.Request)
-	CaptureRoutingResponse(b *route.Endpoint, res *http.Response, t time.Time, d time.Duration)
-}
-
 type Proxy interface {
 	ServeHTTP(responseWriter http.ResponseWriter, request *http.Request)
 }
 
 type ProxyArgs struct {
-	EndpointTimeout time.Duration
-	Ip              string
-	TraceKey        string
-	Registry        LookupRegistry
-	Reporter        ProxyReporter
-	AccessLogger    access_log.AccessLogger
-	SecureCookies   bool
+	EndpointTimeout     time.Duration
+	Ip                  string
+	TraceKey            string
+	Registry            LookupRegistry
+	Reporter            metrics.ProxyReporter
+	AccessLogger        access_log.AccessLogger
+	SecureCookies       bool
+	TLSConfig           *tls.Config
+	RouteServiceEnabled bool
+	RouteServiceTimeout time.Duration
+	Crypto              secure.Crypto
+	CryptoPrev          secure.Crypto
+	ExtraHeadersToLog   []string
 }
 
 type proxy struct {
-	ip            string
-	traceKey      string
-	logger        *steno.Logger
-	registry      LookupRegistry
-	reporter      ProxyReporter
-	accessLogger  access_log.AccessLogger
-	transport     *http.Transport
-	secureCookies bool
+	ip                 string
+	traceKey           string
+	logger             *steno.Logger
+	registry           LookupRegistry
+	reporter           metrics.ProxyReporter
+	accessLogger       access_log.AccessLogger
+	transport          *http.Transport
+	secureCookies      bool
+	routeServiceConfig *route_service.RouteServiceConfig
+	ExtraHeadersToLog  []string
 }
 
 func NewProxy(args ProxyArgs) Proxy {
+	routeServiceConfig := route_service.NewRouteServiceConfig(args.RouteServiceEnabled, args.RouteServiceTimeout, args.Crypto, args.CryptoPrev)
+
 	p := &proxy{
 		accessLogger: args.AccessLogger,
 		traceKey:     args.TraceKey,
@@ -83,9 +91,13 @@ func NewProxy(args ProxyArgs) Proxy {
 			},
 			DisableKeepAlives:  true,
 			DisableCompression: true,
+			TLSClientConfig:    args.TLSConfig,
 		},
-		secureCookies: args.SecureCookies,
+		secureCookies:      args.SecureCookies,
+		routeServiceConfig: routeServiceConfig,
+		ExtraHeadersToLog:  args.ExtraHeadersToLog,
 	}
+
 	return p
 }
 
@@ -118,16 +130,17 @@ func (p *proxy) lookup(request *http.Request) *route.Pool {
 
 func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
 	startedAt := time.Now()
-
 	accessLog := access_log.AccessLogRecord{
-		Request:   request,
-		StartedAt: startedAt,
+		Request:           request,
+		StartedAt:         startedAt,
+		ExtraHeadersToLog: p.ExtraHeadersToLog,
 	}
 
 	requestBodyCounter := &countingReadCloser{delegate: request.Body}
 	request.Body = requestBodyCounter
 
-	handler := NewRequestHandler(request, responseWriter, p.reporter, &accessLog)
+	proxyWriter := NewProxyResponseWriter(responseWriter)
+	handler := NewRequestHandler(request, proxyWriter, p.reporter, &accessLog)
 
 	defer func() {
 		accessLog.RequestBytesReceived = requestBodyCounter.count
@@ -157,7 +170,7 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 
 		afterNext: func(endpoint *route.Endpoint) {
 			if endpoint != nil {
-				handler.logger.Set("RouteEndpoint", endpoint.ToLogData())
+				handler.Logger().Set("RouteEndpoint", endpoint.ToLogData())
 				accessLog.RouteEndpoint = endpoint
 				p.reporter.CaptureRoutingRequest(endpoint, request)
 			}
@@ -166,63 +179,89 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 
 	if isTcpUpgrade(request) {
 		handler.HandleTcpRequest(iter)
+		accessLog.FinishedAt = time.Now()
 		return
 	}
 
 	if isWebSocketUpgrade(request) {
 		handler.HandleWebSocketRequest(iter)
+		accessLog.FinishedAt = time.Now()
 		return
 	}
 
-	proxyWriter := newProxyResponseWriter(responseWriter)
-	roundTripper := &proxyRoundTripper{
-		transport: dropsonde.InstrumentedRoundTripper(p.transport),
-		iter:      iter,
-		handler:   &handler,
+	backend := true
 
-		after: func(rsp *http.Response, endpoint *route.Endpoint, err error) {
-			accessLog.FirstByteAt = time.Now()
-			if rsp != nil {
-				accessLog.StatusCode = rsp.StatusCode
-			}
-
-			if p.traceKey != "" && request.Header.Get(router_http.VcapTraceHeader) == p.traceKey {
-				setTraceHeaders(responseWriter, p.ip, endpoint.CanonicalAddr())
-			}
-
-			latency := time.Since(startedAt)
-
-			p.reporter.CaptureRoutingResponse(endpoint, rsp, startedAt, latency)
-
-			if err != nil {
-				p.reporter.CaptureBadGateway(request)
-				handler.HandleBadGateway(err)
-				proxyWriter.Done()
-				return
-			}
-
-			if endpoint.PrivateInstanceId != "" {
-				setupStickySession(responseWriter, rsp, endpoint, stickyEndpointId, p.secureCookies)
-			}
-		},
+	routeServiceUrl := routePool.RouteServiceUrl()
+	// Attempted to use a route service when it is not supported
+	if routeServiceUrl != "" && !p.routeServiceConfig.RouteServiceEnabled() {
+		handler.HandleUnsupportedRouteService()
+		return
 	}
 
-	p.newReverseProxy(roundTripper, request).ServeHTTP(proxyWriter, request)
+	var routeServiceArgs route_service.RouteServiceArgs
+	if routeServiceUrl != "" {
+		rsSignature := request.Header.Get(route_service.RouteServiceSignature)
+		forwardedUrlRaw := "http" + "://" + request.Host + request.RequestURI
+		if hasBeenToRouteService(routeServiceUrl, rsSignature) {
+			// A request from a route service destined for a backend instances
+			routeServiceArgs.UrlString = routeServiceUrl
+			err := p.routeServiceConfig.ValidateSignature(&request.Header, forwardedUrlRaw)
+			if err != nil {
+				handler.HandleBadSignature(err)
+				return
+			}
+		} else {
+			var err error
+			// should not hardcode http, will be addressed by #100982038
+			routeServiceArgs, err = buildRouteServiceArgs(p.routeServiceConfig, routeServiceUrl, forwardedUrlRaw)
+			backend = false
+			if err != nil {
+				handler.HandleRouteServiceFailure(err)
+				return
+			}
+		}
+	}
+
+	after := func(rsp *http.Response, endpoint *route.Endpoint, err error) {
+		accessLog.FirstByteAt = time.Now()
+		if rsp != nil {
+			accessLog.StatusCode = rsp.StatusCode
+		}
+
+		if p.traceKey != "" && request.Header.Get(router_http.VcapTraceHeader) == p.traceKey {
+			setTraceHeaders(responseWriter, p.ip, endpoint.CanonicalAddr())
+		}
+
+		latency := time.Since(startedAt)
+
+		p.reporter.CaptureRoutingResponse(endpoint, rsp, startedAt, latency)
+
+		if err != nil {
+			p.reporter.CaptureBadGateway(request)
+			handler.HandleBadGateway(err)
+			return
+		}
+
+		if endpoint.PrivateInstanceId != "" {
+			setupStickySession(responseWriter, rsp, endpoint, stickyEndpointId, p.secureCookies, routePool.ContextPath())
+		}
+	}
+
+	roundTripper := NewProxyRoundTripper(backend,
+		dropsonde.InstrumentedRoundTripper(p.transport), iter, handler, after)
+
+	newReverseProxy(roundTripper, request, routeServiceArgs, p.routeServiceConfig).ServeHTTP(proxyWriter, request)
 
 	accessLog.FinishedAt = time.Now()
 	accessLog.BodyBytesSent = proxyWriter.Size()
 }
 
-func (p *proxy) newReverseProxy(proxyTransport http.RoundTripper, req *http.Request) http.Handler {
+func newReverseProxy(proxyTransport http.RoundTripper, req *http.Request,
+	routeServiceArgs route_service.RouteServiceArgs,
+	routeServiceConfig *route_service.RouteServiceConfig) http.Handler {
 	rproxy := &httputil.ReverseProxy{
 		Director: func(request *http.Request) {
-			request.URL.Scheme = "http"
-			request.URL.Host = req.Host
-			request.URL.Opaque = req.RequestURI
-			request.URL.RawQuery = ""
-
-			setRequestXRequestStart(req)
-			setRequestXVcapRequestId(req, nil)
+			SetupProxyRequest(req, request, routeServiceArgs, routeServiceConfig)
 		},
 		Transport:     proxyTransport,
 		FlushInterval: 50 * time.Millisecond,
@@ -231,63 +270,32 @@ func (p *proxy) newReverseProxy(proxyTransport http.RoundTripper, req *http.Requ
 	return rproxy
 }
 
-type proxyRoundTripper struct {
-	transport http.RoundTripper
-	after     AfterRoundTrip
-	iter      route.EndpointIterator
-	handler   *RequestHandler
+func SetupProxyRequest(source *http.Request, target *http.Request,
+	routeServiceArgs route_service.RouteServiceArgs,
+	routeServiceConfig *route_service.RouteServiceConfig) {
+	target.URL.Scheme = "http"
+	target.URL.Host = source.Host
+	target.URL.Opaque = source.RequestURI
+	target.URL.RawQuery = ""
 
-	response *http.Response
-	err      error
+	setRequestXRequestStart(source)
+	setRequestXVcapRequestId(source, nil)
+
+	sig := target.Header.Get(route_service.RouteServiceSignature)
+	if forwardingToRouteService(routeServiceArgs.UrlString, sig) {
+		// An endpoint has a route service and this request did not come from the service
+		routeServiceConfig.SetupRouteServiceRequest(target, routeServiceArgs)
+	} else if hasBeenToRouteService(routeServiceArgs.UrlString, sig) {
+		// Remove the headers since the backend should not see it
+		target.Header.Del(route_service.RouteServiceSignature)
+		target.Header.Del(route_service.RouteServiceMetadata)
+	}
 }
 
-func (p *proxyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	var err error
-	var res *http.Response
-	var endpoint *route.Endpoint
-	retry := 0
-	for {
-		endpoint = p.iter.Next()
-
-		if endpoint == nil {
-			p.handler.reporter.CaptureBadGateway(request)
-			err = noEndpointsAvailable
-			p.handler.HandleBadGateway(err)
-			return nil, err
-		}
-
-		request.URL.Host = endpoint.CanonicalAddr()
-		request.Header.Set("X-CF-ApplicationID", endpoint.ApplicationId)
-		setRequestXCfInstanceId(request, endpoint)
-
-		res, err = p.transport.RoundTrip(request)
-		if err == nil {
-			break
-		}
-
-		if ne, netErr := err.(*net.OpError); !netErr || ne.Op != "dial" {
-			break
-		}
-
-		p.iter.EndpointFailed()
-
-		p.handler.Logger().Set("Error", err.Error())
-		p.handler.Logger().Warnf("proxy.endpoint.failed")
-
-		retry++
-		if retry == retries {
-			break
-		}
+func newRouteServiceEndpoint() *route.Endpoint {
+	return &route.Endpoint{
+		Tags: map[string]string{},
 	}
-
-	if p.after != nil {
-		p.after(res, endpoint, err)
-	}
-
-	p.response = res
-	p.err = err
-
-	return res, err
 }
 
 type wrappedIterator struct {
@@ -307,10 +315,32 @@ func (i *wrappedIterator) EndpointFailed() {
 	i.nested.EndpointFailed()
 }
 
+func buildRouteServiceArgs(routeServiceConfig *route_service.RouteServiceConfig, routeServiceUrl, forwardedUrlRaw string) (route_service.RouteServiceArgs, error) {
+	var routeServiceArgs route_service.RouteServiceArgs
+	sig, metadata, err := routeServiceConfig.GenerateSignatureAndMetadata(forwardedUrlRaw)
+	if err != nil {
+		return routeServiceArgs, err
+	}
+
+	routeServiceArgs.UrlString = routeServiceUrl
+	routeServiceArgs.Signature = sig
+	routeServiceArgs.Metadata = metadata
+	routeServiceArgs.ForwardedUrlRaw = forwardedUrlRaw
+
+	rsURL, err := url.Parse(routeServiceUrl)
+	if err != nil {
+		return routeServiceArgs, err
+	}
+	routeServiceArgs.ParsedUrl = rsURL
+
+	return routeServiceArgs, nil
+}
+
 func setupStickySession(responseWriter http.ResponseWriter, response *http.Response,
 	endpoint *route.Endpoint,
 	originalEndpointId string,
-	secureCookies bool) {
+	secureCookies bool,
+	path string) {
 
 	maxAge := 0
 
@@ -331,7 +361,7 @@ func setupStickySession(responseWriter http.ResponseWriter, response *http.Respo
 		cookie := &http.Cookie{
 			Name:     VcapCookieId,
 			Value:    endpoint.PrivateInstanceId,
-			Path:     "/",
+			Path:     path,
 			MaxAge:   maxAge,
 			HttpOnly: true,
 			Secure:   secureCookies,
@@ -339,6 +369,14 @@ func setupStickySession(responseWriter http.ResponseWriter, response *http.Respo
 
 		http.SetCookie(responseWriter, cookie)
 	}
+}
+
+func forwardingToRouteService(rsUrl, sigHeader string) bool {
+	return sigHeader == "" && rsUrl != ""
+}
+
+func hasBeenToRouteService(rsUrl, sigHeader string) bool {
+	return sigHeader != "" && rsUrl != ""
 }
 
 func isProtocolSupported(request *http.Request) bool {

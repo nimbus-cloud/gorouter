@@ -38,8 +38,9 @@ type NatsConfig struct {
 }
 
 type RoutingApiConfig struct {
-	Uri  string `yaml:"uri"`
-	Port int    `yaml:"port"`
+	Uri          string `yaml:"uri"`
+	Port         int    `yaml:"port"`
+	AuthDisabled bool   `yaml:"auth_disabled"`
 }
 
 var defaultNatsConfig = NatsConfig{
@@ -70,33 +71,38 @@ type Config struct {
 	Nats    []NatsConfig  `yaml:"nats"`
 	Logging LoggingConfig `yaml:"logging"`
 
-	Port           uint16 `yaml:"port"`
-	Index          uint   `yaml:"index"`
-	Zone           string `yaml:"zone"`
-	GoMaxProcs     int    `yaml:"go_max_procs,omitempty"`
-	TraceKey       string `yaml:"trace_key"`
-	AccessLog      string `yaml:"access_log"`
-	DebugAddr      string `yaml:"debug_addr"`
-	EnableSSL      bool   `yaml:"enable_ssl"`
-	SSLPort        uint16 `yaml:"ssl_port"`
-	SSLCertPath    string `yaml:"ssl_cert_path"`
-	SSLKeyPath     string `yaml:"ssl_key_path"`
-	SSLCertificate tls.Certificate
+	Port              uint16 `yaml:"port"`
+	Index             uint   `yaml:"index"`
+	Zone              string `yaml:"zone"`
+	GoMaxProcs        int    `yaml:"go_max_procs,omitempty"`
+	TraceKey          string `yaml:"trace_key"`
+	AccessLog         string `yaml:"access_log"`
+	DebugAddr         string `yaml:"debug_addr"`
+	EnableSSL         bool   `yaml:"enable_ssl"`
+	SSLPort           uint16 `yaml:"ssl_port"`
+	SSLCertPath       string `yaml:"ssl_cert_path"`
+	SSLKeyPath        string `yaml:"ssl_key_path"`
+	SSLCertificate    tls.Certificate
+	SSLSkipValidation bool `yaml:"ssl_skip_validation"`
 
 	CipherString string `yaml:"cipher_suites"`
 	CipherSuites []uint16
 
-	PublishStartMessageIntervalInSeconds int  `yaml:"publish_start_message_interval"`
-	PruneStaleDropletsIntervalInSeconds  int  `yaml:"prune_stale_droplets_interval"`
-	DropletStaleThresholdInSeconds       int  `yaml:"droplet_stale_threshold"`
-	PublishActiveAppsIntervalInSeconds   int  `yaml:"publish_active_apps_interval"`
-	StartResponseDelayIntervalInSeconds  int  `yaml:"start_response_delay_interval"`
-	EndpointTimeoutInSeconds             int  `yaml:"endpoint_timeout"`
-	DrainTimeoutInSeconds                int  `yaml:"drain_timeout,omitempty"`
-	SecureCookies                        bool `yaml:"secure_cookies"`
+	PublishStartMessageIntervalInSeconds int `yaml:"publish_start_message_interval"`
+	PruneStaleDropletsIntervalInSeconds  int `yaml:"prune_stale_droplets_interval"`
+	DropletStaleThresholdInSeconds       int `yaml:"droplet_stale_threshold"`
+	PublishActiveAppsIntervalInSeconds   int `yaml:"publish_active_apps_interval"`
+	StartResponseDelayIntervalInSeconds  int `yaml:"start_response_delay_interval"`
+	EndpointTimeoutInSeconds             int `yaml:"endpoint_timeout"`
+	RouteServiceTimeoutInSeconds         int `yaml:"route_service_timeout"`
 
-	OAuth      token_fetcher.OAuthConfig `yaml:"oauth"`
-	RoutingApi RoutingApiConfig          `yaml:"routing_api"`
+	DrainTimeoutInSeconds int  `yaml:"drain_timeout,omitempty"`
+	SecureCookies         bool `yaml:"secure_cookies"`
+
+	OAuth                  token_fetcher.OAuthConfig `yaml:"oauth"`
+	RoutingApi             RoutingApiConfig          `yaml:"routing_api"`
+	RouteServiceSecret     string                    `yaml:"route_services_secret"`
+	RouteServiceSecretPrev string                    `yaml:"route_services_secret_decrypt_only"`
 
 	// These fields are populated by the `Process` function.
 	PruneStaleDropletsInterval time.Duration `yaml:"-"`
@@ -104,8 +110,12 @@ type Config struct {
 	PublishActiveAppsInterval  time.Duration `yaml:"-"`
 	StartResponseDelayInterval time.Duration `yaml:"-"`
 	EndpointTimeout            time.Duration `yaml:"-"`
+	RouteServiceTimeout        time.Duration `yaml:"-"`
 	DrainTimeout               time.Duration `yaml:"-"`
 	Ip                         string        `yaml:"-"`
+	RouteServiceEnabled        bool          `yaml:"-"`
+
+	ExtraHeadersToLog []string `yaml:"extra_headers_to_log"`
 
 	PreferredNetworkAsString string `yaml:"preferred_network"`
 	PreferredNetwork *net.IPNet
@@ -122,7 +132,8 @@ var defaultConfig = Config{
 	EnableSSL:  false,
 	SSLPort:    443,
 
-	EndpointTimeoutInSeconds: 60,
+	EndpointTimeoutInSeconds:     60,
+	RouteServiceTimeoutInSeconds: 60,
 
 	PublishStartMessageIntervalInSeconds: 30,
 	PruneStaleDropletsIntervalInSeconds:  30,
@@ -152,6 +163,7 @@ func (c *Config) Process() {
 	c.PublishActiveAppsInterval = time.Duration(c.PublishActiveAppsIntervalInSeconds) * time.Second
 	c.StartResponseDelayInterval = time.Duration(c.StartResponseDelayIntervalInSeconds) * time.Second
 	c.EndpointTimeout = time.Duration(c.EndpointTimeoutInSeconds) * time.Second
+	c.RouteServiceTimeout = time.Duration(c.RouteServiceTimeoutInSeconds) * time.Second
 	c.Logging.JobName = "router_" + c.Zone + "_" + strconv.Itoa(int(c.Index))
 
 	if c.PreferredNetworkAsString != "" {
@@ -188,6 +200,10 @@ func (c *Config) Process() {
 		}
 		c.SSLCertificate = cert
 	}
+
+	if c.RouteServiceSecret != "" {
+		c.RouteServiceEnabled = true
+	}
 }
 
 func (c *Config) processCipherSuites() []uint16 {
@@ -205,19 +221,43 @@ func (c *Config) processCipherSuites() []uint16 {
 		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256": 0xc02b,
 	}
 
-	ciphers := []uint16{}
-	if len(strings.TrimSpace(c.CipherString)) == 0 {
-		for _, cipherValue := range cipherMap {
-			ciphers = append(ciphers, cipherValue)
-		}
-		return ciphers
+	defaultCiphers := []string{
+		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+		"TLS_ECDHE_RSA_WITH_RC4_128_SHA",
+		"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA",
+		"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+		"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+		"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+		"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+		"TLS_RSA_WITH_RC4_128_SHA",
+		"TLS_RSA_WITH_AES_128_CBC_SHA",
+		"TLS_RSA_WITH_AES_256_CBC_SHA",
 	}
 
-	for _, cipher := range strings.Split(c.CipherString, ":") {
+	var ciphers []string
+
+	if len(strings.TrimSpace(c.CipherString)) == 0 {
+		ciphers = defaultCiphers
+	} else {
+		ciphers = strings.Split(c.CipherString, ":")
+	}
+
+	return convertCipherStringToInt(ciphers, cipherMap)
+}
+
+func convertCipherStringToInt(cipherStrs []string, cipherMap map[string]uint16) []uint16 {
+	ciphers := []uint16{}
+	for _, cipher := range cipherStrs {
 		if val, ok := cipherMap[cipher]; ok {
 			ciphers = append(ciphers, val)
 		} else {
-			panic("invalid cipher string configuration")
+			var supportedCipherSuites = []string{}
+			for key, _ := range cipherMap {
+				supportedCipherSuites = append(supportedCipherSuites, key)
+			}
+			errMsg := fmt.Sprintf("invalid cipher string configuration: %s, please choose from %v", cipher, supportedCipherSuites)
+			panic(errMsg)
 		}
 	}
 

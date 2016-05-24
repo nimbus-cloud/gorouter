@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 	"net"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cloudfoundry/gorouter/config"
 	"github.com/cloudfoundry/gorouter/route"
+	"github.com/cloudfoundry/gorouter/metrics"
 )
 
 type RegistryInterface interface {
@@ -36,13 +38,15 @@ type RouteRegistry struct {
 
 	messageBus yagnats.NATSConn
 
+	reporter metrics.RouteReporter
+
 	ticker           *time.Ticker
 	timeOfLastUpdate time.Time
 
 	preferredNetwork *net.IPNet
 }
 
-func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn) *RouteRegistry {
+func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn, reporter metrics.RouteReporter) *RouteRegistry {
 	r := &RouteRegistry{}
 
 	r.logger = steno.NewLogger("router.registry")
@@ -55,7 +59,7 @@ func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn) *RouteRegistry {
 	r.preferredNetwork = c.PreferredNetwork
 
 	r.messageBus = mbus
-
+	r.reporter = reporter
 	return r
 }
 
@@ -63,11 +67,12 @@ func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 	t := time.Now()
 	r.Lock()
 
-	uri = uri.ToLower()
+	uri = uri.RouteKey()
 
 	pool, found := r.byUri.Find(uri)
 	if !found {
-		pool = route.NewPool(r.dropletStaleThreshold / 4, r.preferredNetwork)
+		contextPath := parseContextPath(uri)
+		pool = route.NewPool(r.dropletStaleThreshold/4, contextPath, r.preferredNetwork)
 		r.byUri.Insert(uri, pool)
 	}
 
@@ -80,7 +85,7 @@ func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 func (r *RouteRegistry) Unregister(uri route.Uri, endpoint *route.Endpoint) {
 	r.Lock()
 
-	uri = uri.ToLower()
+	uri = uri.RouteKey()
 
 	pool, found := r.byUri.Find(uri)
 	if found {
@@ -97,7 +102,7 @@ func (r *RouteRegistry) Unregister(uri route.Uri, endpoint *route.Endpoint) {
 func (r *RouteRegistry) Lookup(uri route.Uri) *route.Pool {
 	r.RLock()
 
-	uri = uri.ToLower()
+	uri = uri.RouteKey()
 	var err error
 	pool, found := r.byUri.MatchUri(uri)
 	for !found && err == nil {
@@ -122,6 +127,8 @@ func (r *RouteRegistry) StartPruningCycle() {
 				case <-r.ticker.C:
 					r.logger.Debug("Start to check and prune stale droplets")
 					r.pruneStaleDroplets()
+					msSinceLastUpdate := uint64(time.Since(r.TimeOfLastUpdate())/time.Millisecond)
+					r.reporter.CaptureRouteStats(r.NumUris(), msSinceLastUpdate)
 				}
 			}
 		}()
@@ -174,4 +181,14 @@ func (r *RouteRegistry) pruneStaleDroplets() {
 		t.Snip()
 	})
 	r.Unlock()
+}
+
+func parseContextPath(uri route.Uri) string {
+	contextPath := "/"
+	split := strings.SplitN(strings.TrimPrefix(uri.String(), "/"), "/", 2)
+
+	if len(split) > 1 {
+		contextPath += split[1]
+	}
+	return contextPath
 }

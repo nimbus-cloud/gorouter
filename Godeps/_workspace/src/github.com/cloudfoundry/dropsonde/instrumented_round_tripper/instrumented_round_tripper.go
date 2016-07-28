@@ -3,10 +3,12 @@ package instrumented_round_tripper
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/cloudfoundry/dropsonde/emitter"
 	"github.com/cloudfoundry/dropsonde/factories"
 	"github.com/cloudfoundry/sonde-go/events"
+	"github.com/gogo/protobuf/proto"
 	uuid "github.com/nu7hatch/gouuid"
 )
 
@@ -38,7 +40,7 @@ func InstrumentedRoundTripper(roundTripper http.RoundTripper, emitter emitter.Ev
 /*
 Wraps the RoundTrip function of the given RoundTripper.
 Will provide accounting metrics for the http.Request / http.Response life-cycle
-Callers of RoundTrip are responsible for setting the ‘X-CF-RequestID’ field in the request header if they have one.
+Callers of RoundTrip are responsible for setting the ‘X-Vcap-Request-Id’ field in the request header if they have one.
 Callers are also responsible for setting the ‘X-CF-ApplicationID’ and ‘X-CF-InstanceIndex’ fields in the request header if they are known.
 */
 func (irt *instrumentedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,32 +50,30 @@ func (irt *instrumentedRoundTripper) RoundTrip(req *http.Request) (*http.Respons
 		requestId = &uuid.UUID{}
 	}
 
-	httpStart := factories.NewHttpStart(req, events.PeerType_Client, requestId)
-
-	parentRequestId, err := uuid.ParseHex(req.Header.Get("X-CF-RequestID"))
-	if err == nil {
-		httpStart.ParentRequestId = factories.NewUUID(parentRequestId)
-	}
-
-	req.Header.Set("X-CF-RequestID", requestId.String())
-
-	err = irt.emitter.Emit(httpStart)
-	if err != nil {
-		log.Printf("failed to emit start event: %v\n", err)
-	}
+	startTime := time.Now()
+	parentRequestId := req.Header.Get("X-Vcap-Request-Id")
+	req.Header.Set("X-Vcap-Request-Id", requestId.String())
 
 	resp, roundTripErr := irt.roundTripper.RoundTrip(req)
 
-	var httpStop *events.HttpStop
-	if roundTripErr != nil {
-		httpStop = factories.NewHttpStop(req, 0, 0, events.PeerType_Client, requestId)
-	} else {
-		httpStop = factories.NewHttpStop(req, resp.StatusCode, resp.ContentLength, events.PeerType_Client, requestId)
+	var statusCode int
+	var contentLength int64
+	if roundTripErr == nil {
+		statusCode = resp.StatusCode
+		contentLength = resp.ContentLength
 	}
 
-	err = irt.emitter.Emit(httpStop)
+	httpStartStop := factories.NewHttpStartStop(req, statusCode, contentLength, events.PeerType_Client, requestId)
+	if parentRequestId != "" {
+		if id, err := uuid.ParseHex(parentRequestId); err == nil {
+			httpStartStop.ParentRequestId = factories.NewUUID(id)
+		}
+	}
+	httpStartStop.StartTimestamp = proto.Int64(startTime.UnixNano())
+
+	err = irt.emitter.Emit(httpStartStop)
 	if err != nil {
-		log.Printf("failed to emit stop event: %v\n", err)
+		log.Printf("failed to emit startstop event: %v\n", err)
 	}
 
 	return resp, roundTripErr

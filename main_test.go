@@ -1,7 +1,10 @@
 package main_test
 
 import (
+	"crypto/tls"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/cloudfoundry-incubator/candiedyaml"
 	"github.com/cloudfoundry/gorouter/config"
@@ -16,8 +19,8 @@ import (
 	. "github.com/onsi/gomega/gexec"
 	"github.com/pivotal-golang/localip"
 
-	"io"
 	"net"
+	"net/http/httptest"
 	"net/url"
 	"syscall"
 
@@ -45,24 +48,32 @@ var _ = Describe("Router Integration", func() {
 		ioutil.WriteFile(cfgFile, cfgBytes, os.ModePerm)
 	}
 
-	configDrainSetup := func(config *config.Config) {
+	configDrainSetup := func(cfg *config.Config) {
 		// ensure the threshold is longer than the interval that we check,
 		// because we set the route's timestamp to time.Now() on the interval
 		// as part of pausing
-		config.PruneStaleDropletsIntervalInSeconds = 1
-		config.DropletStaleThresholdInSeconds = 2
-		config.StartResponseDelayIntervalInSeconds = 1
-		config.EndpointTimeoutInSeconds = 5
-		config.DrainTimeoutInSeconds = 1
+		cfg.PruneStaleDropletsIntervalInSeconds = 1
+		cfg.DropletStaleThresholdInSeconds = 2
+		cfg.StartResponseDelayIntervalInSeconds = 1
+		cfg.EndpointTimeoutInSeconds = 5
+		cfg.DrainTimeoutInSeconds = 1
 	}
 
 	createConfig := func(cfgFile string, statusPort, proxyPort uint16) *config.Config {
-		config := test_util.SpecConfig(natsPort, statusPort, proxyPort)
+		cfg := test_util.SpecConfig(natsPort, statusPort, proxyPort)
 
-		configDrainSetup(config)
+		configDrainSetup(cfg)
 
-		writeConfig(config, cfgFile)
-		return config
+		cfg.OAuth = config.OAuthConfig{
+			TokenEndpoint:            "non-existent-oauth.com",
+			Port:                     8443,
+			ClientName:               "client-id",
+			ClientSecret:             "client-secret",
+			SkipOAuthTLSVerification: true,
+		}
+
+		writeConfig(cfg, cfgFile)
+		return cfg
 	}
 
 	createSSLConfig := func(cfgFile string, statusPort, proxyPort, SSLPort uint16) *config.Config {
@@ -80,7 +91,6 @@ var _ = Describe("Router Integration", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(session, 5).Should(Say("gorouter.started"))
 		gorouterSession = session
-
 		return session
 	}
 
@@ -162,12 +172,15 @@ var _ = Describe("Router Integration", func() {
 
 			go func() {
 				defer GinkgoRecover()
-
 				//Open a connection that never goes active
-				conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", localIP, proxyPort))
-				Expect(err).NotTo(HaveOccurred())
-				err = conn.Close()
-				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() bool {
+					conn, err := net.DialTimeout("tcp",
+						fmt.Sprintf("%s:%d", localIP, proxyPort), 30*time.Second)
+					if err == nil {
+						return conn.Close() == nil
+					}
+					return false
+				}).Should(BeTrue())
 
 				//Open a connection that goes active
 				resp, err := http.Get(longApp.Endpoint())
@@ -190,11 +203,12 @@ var _ = Describe("Router Integration", func() {
 			requestProcessing <- true
 
 			Expect(err).ToNot(HaveOccurred())
+
 			Eventually(grouter, 5).Should(Exit(0))
 			Eventually(responseRead).Should(Receive(BeTrue()))
 		})
 
-		It("returns EOF error when the gorouter terminates before a request completes", func() {
+		It("returns error when the gorouter terminates before a request completes", func() {
 			mbusClient, err := newMessageBus(config)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -210,6 +224,7 @@ var _ = Describe("Router Integration", func() {
 			Eventually(func() bool { return appRegistered(routesUri, timeoutApp) }).Should(BeTrue())
 
 			go func() {
+				defer GinkgoRecover()
 				_, err := http.Get(timeoutApp.Endpoint())
 				resultCh <- err
 			}()
@@ -227,9 +242,7 @@ var _ = Describe("Router Integration", func() {
 
 			var result error
 			Eventually(resultCh, 5).Should(Receive(&result))
-			Expect(result).To(BeAssignableToTypeOf(&url.Error{}))
-			urlErr := result.(*url.Error)
-			Expect(urlErr.Err).To(Equal(io.EOF))
+			Expect(result).ToNot(BeNil())
 		})
 
 		It("prevents new connections", func() {
@@ -295,7 +308,7 @@ var _ = Describe("Router Integration", func() {
 
 			gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
 			gorouterSession, _ = Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
-			Eventually(gorouterSession, 5).Should(Exit(1))
+			Eventually(gorouterSession, 5*time.Second).Should(Exit(2))
 		})
 	})
 
@@ -394,10 +407,54 @@ var _ = Describe("Router Integration", func() {
 		})
 	})
 
+	Context("when no oauth config is specified", func() {
+		Context("and routing api is disabled", func() {
+			It("is able to start up", func() {
+				statusPort := test_util.NextAvailPort()
+				proxyPort := test_util.NextAvailPort()
+
+				cfgFile := filepath.Join(tmpdir, "config.yml")
+				cfg := createConfig(cfgFile, statusPort, proxyPort)
+				cfg.OAuth = config.OAuthConfig{}
+				writeConfig(cfg, cfgFile)
+
+				// The process should not have any error.
+				session := startGorouterSession(cfgFile)
+				stopGorouter(session)
+			})
+		})
+	})
+
+	Context("when routing api is disabled", func() {
+		var (
+			cfgFile string
+			cfg     *config.Config
+		)
+
+		BeforeEach(func() {
+			statusPort := test_util.NextAvailPort()
+			proxyPort := test_util.NextAvailPort()
+
+			cfgFile = filepath.Join(tmpdir, "config.yml")
+
+			cfg = createConfig(cfgFile, statusPort, proxyPort)
+			writeConfig(cfg, cfgFile)
+		})
+
+		It("doesn't start the route fetcher", func() {
+			session := startGorouterSession(cfgFile)
+			Eventually(session).ShouldNot(Say("setting-up-routing-api"))
+			stopGorouter(session)
+		})
+
+	})
+
 	Context("when the routing api is enabled", func() {
 		var (
-			config  *config.Config
-			cfgFile string
+			config         *config.Config
+			uaaTlsListener net.Listener
+			routingApi     *httptest.Server
+			cfgFile        string
 		)
 
 		BeforeEach(func() {
@@ -406,8 +463,13 @@ var _ = Describe("Router Integration", func() {
 
 			cfgFile = filepath.Join(tmpdir, "config.yml")
 			config = createConfig(cfgFile, statusPort, proxyPort)
-			config.RoutingApi.Uri = "http://localhost"
-			config.RoutingApi.Port = 4567
+
+			routingApi = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				jsonBytes := []byte(`[{"route":"foo.com","port":65340,"ip":"1.2.3.4","ttl":60,"log_guid":"foo-guid"}]`)
+				w.Write(jsonBytes)
+			}))
+			config.RoutingApi.Uri, config.RoutingApi.Port = uriAndPort(routingApi.URL)
+
 		})
 
 		Context("when the routing api auth is disabled ", func() {
@@ -417,24 +479,108 @@ var _ = Describe("Router Integration", func() {
 
 				// note, this will start with routing api, but will not be able to connect
 				session := startGorouterSession(cfgFile)
-				Expect(gorouterSession.Out.Contents()).To(ContainSubstring("using noop token fetcher"))
+				Expect(gorouterSession.Out.Contents()).To(ContainSubstring("using-noop-token-fetcher"))
 				stopGorouter(session)
 			})
 		})
 
 		Context("when the routing api auth is enabled (default)", func() {
-			It("uses the uaa token fetcher", func() {
+			Context("when uaa is available on tls port", func() {
+				BeforeEach(func() {
+					uaaTlsListener = setupTlsServer()
+					config.OAuth.TokenEndpoint, config.OAuth.Port = hostnameAndPort(uaaTlsListener.Addr().String())
+				})
+
+				It("fetches a token from uaa", func() {
+					writeConfig(config, cfgFile)
+
+					// note, this will start with routing api, but will not be able to connect
+					session := startGorouterSession(cfgFile)
+					Expect(gorouterSession.Out.Contents()).To(ContainSubstring("started-fetching-token"))
+					stopGorouter(session)
+				})
+			})
+
+			Context("when the uaa is not available", func() {
+				It("gorouter exits with non-zero code", func() {
+					writeConfig(config, cfgFile)
+
+					gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
+					session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session, 30*time.Second).Should(Say("unable-to-fetch-token"))
+					Eventually(session, 5*time.Second).Should(Exit(2))
+				})
+			})
+
+			Context("when routing api is not available", func() {
+				BeforeEach(func() {
+					uaaTlsListener = setupTlsServer()
+					config.OAuth.TokenEndpoint, config.OAuth.Port = hostnameAndPort(uaaTlsListener.Addr().String())
+				})
+				It("gorouter exits with non-zero code", func() {
+					routingApi.Close()
+					writeConfig(config, cfgFile)
+
+					gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
+					session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session, 30*time.Second).Should(Say("routing-api-connection-failed"))
+					Eventually(session, 5*time.Second).Should(Exit(2))
+				})
+			})
+		})
+
+		Context("when tls for uaa is disabled", func() {
+			It("fails fast", func() {
+				config.OAuth.Port = -1
 				writeConfig(config, cfgFile)
 
-				// note, this will start with routing api, but will not be able to connect
-				session := startGorouterSession(cfgFile)
-				Expect(gorouterSession.Out.Contents()).To(ContainSubstring("using uaa token fetcher"))
-				stopGorouter(session)
+				gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
+				session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
+				Expect(err).ToNot(HaveOccurred())
+				Eventually(session, 30*time.Second).Should(Say("tls-not-enabled"))
+				Eventually(session, 5*time.Second).Should(Exit(2))
 			})
+		})
+	})
+
+	Context("when failing to open configured logging file", func() {
+		var cfgFile string
+
+		BeforeEach(func() {
+			statusPort := test_util.NextAvailPort()
+			proxyPort := test_util.NextAvailPort()
+
+			cfgFile = filepath.Join(tmpdir, "config.yml")
+			config := createConfig(cfgFile, statusPort, proxyPort)
+			config.Logging.File = "nonExistentDir/file"
+			writeConfig(config, cfgFile)
+		})
+
+		It("exits with non-zero code", func() {
+			gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
+			session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
+			Expect(err).ToNot(HaveOccurred())
+			Eventually(session, 30*time.Second).Should(Say("error-opening-log-file"))
+			Eventually(session, 5*time.Second).Should(Exit(2))
 		})
 	})
 })
 
+func uriAndPort(url string) (string, int) {
+	parts := strings.Split(url, ":")
+	uri := strings.Join(parts[0:2], ":")
+	port, _ := strconv.Atoi(parts[2])
+	return uri, port
+}
+
+func hostnameAndPort(url string) (string, int) {
+	parts := strings.Split(url, ":")
+	hostname := parts[0]
+	port, _ := strconv.Atoi(parts[1])
+	return hostname, port
+}
 func newMessageBus(c *config.Config) (yagnats.NATSConn, error) {
 	natsMembers := make([]string, len(c.Nats))
 	for _, info := range c.Nats {
@@ -479,4 +625,36 @@ func routeExists(routesEndpoint, routeName string) (bool, error) {
 	default:
 		return false, errors.New("Didn't get an OK response")
 	}
+}
+
+func setupTlsServer() net.Listener {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).ToNot(HaveOccurred())
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fmt.Sprintf("{\"alg\":\"alg\", \"value\": \"%s\" }", "fake-public-key")))
+	})
+
+	tlsListener := newTlsListener(listener)
+	tlsServer := &http.Server{Handler: handler}
+
+	go func() {
+		err := tlsServer.Serve(tlsListener)
+		Expect(err).ToNot(HaveOccurred())
+	}()
+	return tlsListener
+}
+
+func newTlsListener(listener net.Listener) net.Listener {
+	public := "test/assets/public.pem"
+	private := "test/assets/private.pem"
+	cert, err := tls.LoadX509KeyPair(public, private)
+	Expect(err).ToNot(HaveOccurred())
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_256_CBC_SHA},
+	}
+
+	return tls.NewListener(listener, tlsConfig)
 }

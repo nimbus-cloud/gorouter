@@ -4,7 +4,6 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/cloudfoundry-incubator/uaa-token-fetcher"
 	"github.com/cloudfoundry/gorouter/config"
 
 	"time"
@@ -28,6 +27,7 @@ func SpecSSLConfig(natsPort, statusPort, proxyPort, SSLPort uint16) *config.Conf
 	c.SSLKeyPath = filepath.Join(testPath, "private.pem")
 	c.SSLCertPath = filepath.Join(testPath, "public.pem")
 	c.SSLPort = SSLPort
+	c.CipherString = "TLS_RSA_WITH_AES_128_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA"
 
 	return c
 }
@@ -68,14 +68,15 @@ func generateConfig(natsPort, statusPort, proxyPort uint16) *config.Config {
 
 	c.Logging = config.LoggingConfig{
 		File:          "/dev/stdout",
-		Level:         "info",
+		Level:         "debug",
 		MetronAddress: "localhost:3457",
 		JobName:       "router_test_z1_0",
 	}
 
-	c.OAuth = token_fetcher.OAuthConfig{
-		TokenEndpoint: "http://localhost",
-		Port:          8080,
+	c.OAuth = config.OAuthConfig{
+		TokenEndpoint: "uaa.cf.service.internal",
+		Port:          8443,
+		SkipOAuthTLSVerification: true,
 	}
 
 	c.RouteServiceSecret = "kCvXxNMB0JO2vinxoru9Hg=="

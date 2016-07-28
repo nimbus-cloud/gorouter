@@ -1,17 +1,22 @@
 package router
 
 import (
+	"io/ioutil"
+	"os"
+	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/apcera/nats"
 	"github.com/cloudfoundry/dropsonde"
 	vcap "github.com/cloudfoundry/gorouter/common"
+	router_http "github.com/cloudfoundry/gorouter/common/http"
 	"github.com/cloudfoundry/gorouter/config"
 	"github.com/cloudfoundry/gorouter/proxy"
 	"github.com/cloudfoundry/gorouter/registry"
 	"github.com/cloudfoundry/gorouter/varz"
-	steno "github.com/cloudfoundry/gosteno"
 	"github.com/cloudfoundry/yagnats"
+	"github.com/pivotal-golang/lager"
 	"github.com/pivotal-golang/localip"
 
 	"bytes"
@@ -26,6 +31,7 @@ import (
 )
 
 var DrainTimeout = errors.New("router: Drain timeout")
+
 var noDeadline = time.Time{}
 
 type Router struct {
@@ -45,12 +51,15 @@ type Router struct {
 	drainDone        chan struct{}
 	serveDone        chan struct{}
 	tlsServeDone     chan struct{}
+	stopping         bool
+	stopLock         sync.Mutex
 
-	logger *steno.Logger
+	logger  lager.Logger
+	errChan chan error
 }
 
-func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r *registry.RouteRegistry, v varz.Varz,
-	logCounter *vcap.LogCounter) (*Router, error) {
+func NewRouter(logger lager.Logger, cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r *registry.RouteRegistry,
+	v varz.Varz, logCounter *vcap.LogCounter, errChan chan error) (*Router, error) {
 
 	var host string
 	if cfg.Status.Port != 0 {
@@ -77,7 +86,12 @@ func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r
 		InfoRoutes: map[string]json.Marshaler{
 			"/routes": r,
 		},
-		Logger: steno.NewLogger("common.logger"),
+		Logger: logger,
+	}
+
+	routerErrChan := errChan
+	if routerErrChan == nil {
+		routerErrChan = make(chan error, 2)
 	}
 
 	router := &Router{
@@ -91,7 +105,9 @@ func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r
 		tlsServeDone: make(chan struct{}),
 		idleConns:    make(map[net.Conn]struct{}),
 		activeConns:  make(map[net.Conn]struct{}),
-		logger:       steno.NewLogger("router"),
+		logger:       logger,
+		errChan:      routerErrChan,
+		stopping:     false,
 	}
 
 	if err := router.component.Start(); err != nil {
@@ -101,7 +117,28 @@ func NewRouter(cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r
 	return router, nil
 }
 
-func (r *Router) Run() <-chan error {
+type gorouterHandler struct {
+	handler http.Handler
+	logger  lager.Logger
+}
+
+func (h *gorouterHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	setRequestXVcapRequestId(req, h.logger)
+
+	h.handler.ServeHTTP(res, req)
+}
+
+func setRequestXVcapRequestId(request *http.Request, logger lager.Logger) {
+	uuid, err := vcap.GenerateUUID()
+	if err == nil {
+		request.Header.Set(router_http.VcapRequestIdHeader, uuid)
+		if logger != nil {
+			logger.Debug("vcap-request-id-header-set", lager.Data{router_http.VcapRequestIdHeader: uuid})
+		}
+	}
+}
+
+func (r *Router) Run(signals <-chan os.Signal, ready chan<- struct{}) error {
 	r.registry.StartPruningCycle()
 
 	r.RegisterComponent()
@@ -115,7 +152,7 @@ func (r *Router) Run() <-chan error {
 	r.SendStartMessage()
 
 	r.mbusClient.AddReconnectedCB(func(conn *nats.Conn) {
-		r.logger.Infof("Reconnecting to NATS server %s...", conn.Opts.Url)
+		r.logger.Info(fmt.Sprintf("Reconnecting to NATS server %s...", conn.Opts.Url))
 		r.SendStartMessage()
 	})
 
@@ -125,29 +162,95 @@ func (r *Router) Run() <-chan error {
 	// Wait for one start message send interval, such that the router's registry
 	// can be populated before serving requests.
 	if r.config.StartResponseDelayInterval != 0 {
-		r.logger.Infof("Waiting %s before listening...", r.config.StartResponseDelayInterval)
+		r.logger.Info(fmt.Sprintf("Waiting %s before listening...", r.config.StartResponseDelayInterval))
 		time.Sleep(r.config.StartResponseDelayInterval)
 	}
 
+	handler := gorouterHandler{handler: dropsonde.InstrumentedHandler(r.proxy), logger: r.logger}
+
 	server := &http.Server{
-		Handler:   dropsonde.InstrumentedHandler(r.proxy),
+		Handler:   &handler,
 		ConnState: r.HandleConnState,
 	}
 
-	errChan := make(chan error, 2)
-
-	err := r.serveHTTP(server, errChan)
+	err := r.serveHTTP(server, r.errChan)
 	if err != nil {
-		errChan <- err
-		return errChan
+		r.errChan <- err
+		return err
 	}
-	err = r.serveHTTPS(server, errChan)
+	err = r.serveHTTPS(server, r.errChan)
 	if err != nil {
-		errChan <- err
-		return errChan
+		r.errChan <- err
+		return err
 	}
 
-	return errChan
+	// create pid file
+	err = r.writePidFile(r.config.PidFile)
+	if err != nil {
+		return err
+	}
+
+	r.logger.Info("gorouter.started")
+
+	close(ready)
+
+	r.OnErrOrSignal(signals, r.errChan)
+
+	return nil
+}
+
+func (r *Router) writePidFile(pidFile string) error {
+	if pidFile != "" {
+		pid := strconv.Itoa(os.Getpid())
+		err := ioutil.WriteFile(pidFile, []byte(pid), 0660)
+		if err != nil {
+			return fmt.Errorf("cannot create pid file:  %v", err)
+		}
+	}
+	return nil
+}
+
+func (r *Router) OnErrOrSignal(signals <-chan os.Signal, errChan chan error) {
+	select {
+	case err := <-errChan:
+		if err != nil {
+			r.logger.Error("Error occurred: ", err)
+			r.DrainAndStop()
+		}
+	case sig := <-signals:
+		go func() {
+			for sig := range signals {
+				r.logger.Info(
+					"gorouter.signal.ignored",
+					lager.Data{
+						"signal": sig.String(),
+					},
+				)
+			}
+		}()
+		if sig == syscall.SIGUSR1 {
+			r.DrainAndStop()
+		} else {
+			r.Stop()
+		}
+	}
+	r.logger.Info("gorouter.exited")
+}
+
+func (r *Router) DrainAndStop() {
+	drainWait := r.config.DrainWait
+	drainTimeout := r.config.DrainTimeout
+	r.logger.Info(
+		"gorouter.draining",
+		lager.Data{
+			"wait":    (drainWait).String(),
+			"timeout": (drainTimeout).String(),
+		},
+	)
+
+	r.Drain(drainWait, drainTimeout)
+
+	r.Stop()
 }
 
 func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
@@ -159,16 +262,20 @@ func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
 
 		tlsListener, err := tls.Listen("tcp", fmt.Sprintf(":%d", r.config.SSLPort), tlsConfig)
 		if err != nil {
-			r.logger.Fatalf("tls.Listen: %s", err)
+			r.logger.Fatal("tls.Listen: %s", err)
 			return err
 		}
 
 		r.tlsListener = tlsListener
-		r.logger.Infof("Listening on %s", tlsListener.Addr())
+		r.logger.Info(fmt.Sprintf("Listening on %s", tlsListener.Addr()))
 
 		go func() {
 			err := server.Serve(tlsListener)
-			errChan <- err
+			r.stopLock.Lock()
+			if !r.stopping {
+				errChan <- err
+			}
+			r.stopLock.Unlock()
 			close(r.tlsServeDone)
 		}()
 	}
@@ -178,29 +285,39 @@ func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
 func (r *Router) serveHTTP(server *http.Server, errChan chan error) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", r.config.Port))
 	if err != nil {
-		r.logger.Fatalf("net.Listen: %s", err)
+		r.logger.Fatal("net.Listen: %s", err)
 		return err
 	}
 
 	r.listener = listener
-	r.logger.Infof("Listening on %s", listener.Addr())
+	r.logger.Info(fmt.Sprintf("Listening on %s", listener.Addr()))
 
 	go func() {
 		err := server.Serve(listener)
-		errChan <- err
+		r.stopLock.Lock()
+		if !r.stopping {
+			errChan <- err
+		}
+		r.stopLock.Unlock()
+
 		close(r.serveDone)
 	}()
 	return nil
 }
 
-func (r *Router) Drain(drainTimeout time.Duration) error {
+func (r *Router) Drain(drainWait, drainTimeout time.Duration) error {
+	r.proxy.Drain()
+
+	<-time.After(drainWait)
+
 	r.stopListening()
 
 	drained := make(chan struct{})
+
 	r.connLock.Lock()
 
-	r.logger.Infof("Draining with %d outstanding active connections", len(r.activeConns))
-	r.logger.Infof("Draining with %d outstanding idle connections", len(r.idleConns))
+	r.logger.Info(fmt.Sprintf("Draining with %d outstanding active connections", len(r.activeConns)))
+	r.logger.Info(fmt.Sprintf("Draining with %d outstanding idle connections", len(r.idleConns)))
 	r.closeIdleConns()
 
 	if len(r.activeConns) == 0 {
@@ -208,18 +325,24 @@ func (r *Router) Drain(drainTimeout time.Duration) error {
 	} else {
 		r.drainDone = drained
 	}
+
 	r.connLock.Unlock()
 
 	select {
 	case <-drained:
 	case <-time.After(drainTimeout):
-		r.logger.Warn("router.drain.timed-out")
+		r.logger.Info("router.drain.timed-out")
 		return DrainTimeout
 	}
+
 	return nil
 }
 
 func (r *Router) Stop() {
+	stoppingAt := time.Now()
+
+	r.logger.Info("gorouter.stopping")
+
 	r.stopListening()
 
 	r.connLock.Lock()
@@ -227,6 +350,12 @@ func (r *Router) Stop() {
 	r.connLock.Unlock()
 
 	r.component.Stop()
+	r.logger.Info(
+		"gorouter.stopped",
+		lager.Data{
+			"took": time.Since(stoppingAt).String(),
+		},
+	)
 }
 
 // connLock must be locked
@@ -239,6 +368,10 @@ func (r *Router) closeIdleConns() {
 }
 
 func (r *Router) stopListening() {
+	r.stopLock.Lock()
+	r.stopping = true
+	r.stopLock.Unlock()
+
 	r.listener.Close()
 
 	if r.tlsListener != nil {
@@ -255,7 +388,7 @@ func (r *Router) RegisterComponent() {
 
 func (r *Router) SubscribeRegister() {
 	r.subscribeRegistry("router.register", func(registryMessage *RegistryMessage) {
-		r.logger.Debugf("Got router.register: %v", registryMessage)
+		r.logger.Debug("Got router.register:", lager.Data{"registry Message": registryMessage})
 
 		for _, uri := range registryMessage.Uris {
 			r.registry.Register(
@@ -268,7 +401,7 @@ func (r *Router) SubscribeRegister() {
 
 func (r *Router) SubscribeUnregister() {
 	r.subscribeRegistry("router.unregister", func(registryMessage *RegistryMessage) {
-		r.logger.Debugf("Got router.unregister: %v", registryMessage)
+		r.logger.Debug("Got router.unregister:", lager.Data{"registry Message": registryMessage})
 
 		for _, uri := range registryMessage.Uris {
 			r.registry.Unregister(
@@ -282,7 +415,7 @@ func (r *Router) SubscribeUnregister() {
 func (r *Router) HandleGreetings() {
 	r.mbusClient.Subscribe("router.greet", func(msg *nats.Msg) {
 		if msg.Reply == "" {
-			r.logger.Warnf("Received message with empty reply on subject %s", msg.Subject)
+			r.logger.Info(fmt.Sprintf("Received message with empty reply on subject %s", msg.Subject))
 			return
 		}
 
@@ -331,7 +464,7 @@ func (r *Router) HandleConnState(conn net.Conn, state http.ConnState) {
 		r.activeConns[conn] = struct{}{}
 		delete(r.idleConns, conn)
 
-		conn.SetDeadline(time.Time{})
+		conn.SetDeadline(noDeadline)
 	case http.StateIdle:
 		delete(r.activeConns, conn)
 		r.idleConns[conn] = struct{}{}
@@ -367,7 +500,7 @@ func (r *Router) flushApps(t time.Time) {
 
 	y, err := json.Marshal(x)
 	if err != nil {
-		r.logger.Warnf("flushApps: Error marshalling JSON: %s", err)
+		r.logger.Info(fmt.Sprintf("flushApps: Error marshalling JSON: %s", err.Error()))
 		return
 	}
 
@@ -378,7 +511,7 @@ func (r *Router) flushApps(t time.Time) {
 
 	z := b.Bytes()
 
-	r.logger.Debugf("Active apps: %d, message size: %d", len(x), len(z))
+	r.logger.Debug("Debug Info", lager.Data{"Active apps": len(x), "message size:": len(z)})
 
 	r.mbusClient.Publish("router.active_apps", z)
 }
@@ -408,16 +541,16 @@ func (r *Router) subscribeRegistry(subject string, successCallback func(*Registr
 		err := json.Unmarshal(payload, &msg)
 		if err != nil {
 			logMessage := fmt.Sprintf("%s: Error unmarshalling JSON (%d; %s): %s", subject, len(payload), payload, err)
-			r.logger.Warnd(map[string]interface{}{"payload": string(payload)}, logMessage)
+			r.logger.Info(logMessage, lager.Data{"payload": string(payload)})
 			return
 		}
 
 		logMessage := fmt.Sprintf("%s: Received message", subject)
-		r.logger.Debugd(map[string]interface{}{"message": msg}, logMessage)
+		r.logger.Debug(logMessage, lager.Data{"message": msg})
 
 		if !msg.ValidateMessage() {
 			logMessage := fmt.Sprintf("%s: Unable to validate message. route_service_url must be https", subject)
-			r.logger.Warnd(map[string]interface{}{"message": msg}, logMessage)
+			r.logger.Info(logMessage, lager.Data{"message": msg})
 			return
 		}
 
@@ -426,6 +559,6 @@ func (r *Router) subscribeRegistry(subject string, successCallback func(*Registr
 
 	_, err := r.mbusClient.Subscribe(subject, callback)
 	if err != nil {
-		r.logger.Errorf("Error subscribing to %s: %s", subject, err)
+		r.logger.Error(fmt.Sprintf("Error subscribing to %s ", subject), err)
 	}
 }

@@ -14,24 +14,28 @@ import (
 	"github.com/cloudfoundry/gorouter/registry"
 	"github.com/cloudfoundry/gorouter/test_util"
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
+	"github.com/pivotal-golang/lager"
+	"github.com/pivotal-golang/lager/lagertest"
 
 	"testing"
 	"time"
 
+	"github.com/cloudfoundry/gorouter/metrics/fakes"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
 )
 
 var (
-	r             *registry.RouteRegistry
-	p             proxy.Proxy
-	conf          *config.Config
-	proxyServer   net.Listener
-	accessLog     access_log.AccessLogger
-	accessLogFile *test_util.FakeFile
-	crypto        secure.Crypto
-	cryptoPrev    secure.Crypto
+	r              *registry.RouteRegistry
+	p              proxy.Proxy
+	conf           *config.Config
+	proxyServer    net.Listener
+	accessLog      access_log.AccessLogger
+	accessLogFile  *test_util.FakeFile
+	crypto         secure.Crypto
+	logger         lager.Logger
+	cryptoPrev     secure.Crypto
+	recommendHttps bool
 )
 
 func TestProxy(t *testing.T) {
@@ -40,6 +44,7 @@ func TestProxy(t *testing.T) {
 }
 
 var _ = BeforeEach(func() {
+	logger = lagertest.NewTestLogger("test")
 	var err error
 
 	crypto, err = secure.NewAesGCM([]byte("ABCDEFGHIJKLMNOP"))
@@ -55,13 +60,13 @@ var _ = BeforeEach(func() {
 var _ = JustBeforeEach(func() {
 	var err error
 	mbus := fakeyagnats.Connect()
-	r = registry.NewRouteRegistry(conf, mbus, new(fakes.FakeRouteReporter))
+	r = registry.NewRouteRegistry(logger, conf, mbus, new(fakes.FakeRouteRegistryReporter))
 
 	fakeEmitter := fake.NewFakeEventEmitter("fake")
 	dropsonde.InitializeWithEmitter(fakeEmitter)
 
 	accessLogFile = new(test_util.FakeFile)
-	accessLog = access_log.NewFileAndLoggregatorAccessLogger(accessLogFile, "")
+	accessLog = access_log.NewFileAndLoggregatorAccessLogger(logger, "", accessLogFile)
 	go accessLog.Run()
 
 	conf.EnableSSL = true
@@ -73,18 +78,20 @@ var _ = JustBeforeEach(func() {
 	}
 
 	p = proxy.NewProxy(proxy.ProxyArgs{
-		EndpointTimeout:     conf.EndpointTimeout,
-		Ip:                  conf.Ip,
-		TraceKey:            conf.TraceKey,
-		Registry:            r,
-		Reporter:            nullVarz{},
-		AccessLogger:        accessLog,
-		SecureCookies:       conf.SecureCookies,
-		TLSConfig:           tlsConfig,
-		RouteServiceEnabled: conf.RouteServiceEnabled,
-		RouteServiceTimeout: conf.RouteServiceTimeout,
-		Crypto:              crypto,
-		CryptoPrev:          cryptoPrev,
+		EndpointTimeout:            conf.EndpointTimeout,
+		Ip:                         conf.Ip,
+		TraceKey:                   conf.TraceKey,
+		Logger:                     logger,
+		Registry:                   r,
+		Reporter:                   nullVarz{},
+		AccessLogger:               accessLog,
+		SecureCookies:              conf.SecureCookies,
+		TLSConfig:                  tlsConfig,
+		RouteServiceEnabled:        conf.RouteServiceEnabled,
+		RouteServiceTimeout:        conf.RouteServiceTimeout,
+		Crypto:                     crypto,
+		CryptoPrev:                 cryptoPrev,
+		RouteServiceRecommendHttps: recommendHttps,
 	})
 
 	proxyServer, err = net.Listen("tcp", "127.0.0.1:0")

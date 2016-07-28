@@ -5,6 +5,7 @@ import (
 	"regexp"
 
 	"github.com/cloudfoundry/dropsonde/logs"
+	"github.com/pivotal-golang/lager"
 )
 
 type FileAndLoggregatorAccessLogger struct {
@@ -12,16 +13,18 @@ type FileAndLoggregatorAccessLogger struct {
 	channel                 chan AccessLogRecord
 	stopCh                  chan struct{}
 	writer                  io.Writer
+	writerCount             int
+	logger                  lager.Logger
 }
 
-func NewFileAndLoggregatorAccessLogger(f io.Writer, dropsondeSourceInstance string) *FileAndLoggregatorAccessLogger {
+func NewFileAndLoggregatorAccessLogger(logger lager.Logger, dropsondeSourceInstance string, ws ...io.Writer) *FileAndLoggregatorAccessLogger {
 	a := &FileAndLoggregatorAccessLogger{
 		dropsondeSourceInstance: dropsondeSourceInstance,
-		writer:                  f,
 		channel:                 make(chan AccessLogRecord, 128),
 		stopCh:                  make(chan struct{}),
+		logger:                  logger,
 	}
-
+	configureWriters(a, ws)
 	return a
 }
 
@@ -30,9 +33,11 @@ func (x *FileAndLoggregatorAccessLogger) Run() {
 		select {
 		case record := <-x.channel:
 			if x.writer != nil {
-				record.WriteTo(x.writer)
+				_, err := record.WriteTo(x.writer)
+				if err != nil {
+					x.logger.Error("Error when emiting access log to writers ", err)
+				}
 			}
-
 			if x.dropsondeSourceInstance != "" && record.ApplicationId() != "" {
 				logs.SendAppLog(record.ApplicationId(), record.LogMessage(), "RTR", x.dropsondeSourceInstance)
 			}
@@ -44,6 +49,9 @@ func (x *FileAndLoggregatorAccessLogger) Run() {
 
 func (x *FileAndLoggregatorAccessLogger) FileWriter() io.Writer {
 	return x.writer
+}
+func (x *FileAndLoggregatorAccessLogger) WriterCount() int {
+	return x.writerCount
 }
 
 func (x *FileAndLoggregatorAccessLogger) DropsondeSourceInstance() string {
@@ -63,4 +71,17 @@ var hostnameRegex, _ = regexp.Compile(`^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[
 
 func isValidUrl(url string) bool {
 	return ipAddressRegex.MatchString(url) || hostnameRegex.MatchString(url)
+}
+
+func configureWriters(a *FileAndLoggregatorAccessLogger, ws []io.Writer) {
+	var multiws []io.Writer
+	for _, w := range ws {
+		if w != nil {
+			multiws = append(multiws, w)
+			a.writerCount++
+		}
+	}
+	if len(multiws) > 0 {
+		a.writer = io.MultiWriter(multiws...)
+	}
 }

@@ -1,29 +1,36 @@
 package access_log
 
 import (
-	"github.com/cloudfoundry/gorouter/config"
-	steno "github.com/cloudfoundry/gosteno"
+	"fmt"
 	"strconv"
 
+	"github.com/cloudfoundry/gorouter/config"
+	"github.com/pivotal-golang/lager"
+
+	"io"
 	"os"
 )
 
-func CreateRunningAccessLogger(config *config.Config) (AccessLogger, error) {
+func CreateRunningAccessLogger(logger lager.Logger, config *config.Config) (AccessLogger, error) {
 
-	if config.AccessLog == "" && !config.Logging.LoggregatorEnabled {
+	if config.AccessLog.File == "" && !config.Logging.LoggregatorEnabled {
 		return &NullAccessLogger{}, nil
 	}
 
-	logger := steno.NewLogger("access_log")
-
 	var err error
 	var file *os.File
-	if config.AccessLog != "" {
-		file, err = os.OpenFile(config.AccessLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
+	var writers []io.Writer
+	if config.AccessLog.File != "" {
+		file, err = os.OpenFile(config.AccessLog.File, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
 		if err != nil {
-			logger.Errorf("Error creating accesslog file, %s: (%s)", config.AccessLog, err.Error())
+			logger.Error(fmt.Sprintf("Error creating accesslog file, %s", config.AccessLog.File), err)
 			return nil, err
 		}
+		writers = append(writers, file)
+	}
+
+	if config.AccessLog.EnableStreaming {
+		writers = append(writers, os.Stdout)
 	}
 
 	var dropsondeSourceInstance string
@@ -31,7 +38,7 @@ func CreateRunningAccessLogger(config *config.Config) (AccessLogger, error) {
 		dropsondeSourceInstance = strconv.FormatUint(uint64(config.Index), 10)
 	}
 
-	accessLogger := NewFileAndLoggregatorAccessLogger(file, dropsondeSourceInstance)
+	accessLogger := NewFileAndLoggregatorAccessLogger(logger, dropsondeSourceInstance, writers...)
 	go accessLogger.Run()
 	return accessLogger, nil
 }

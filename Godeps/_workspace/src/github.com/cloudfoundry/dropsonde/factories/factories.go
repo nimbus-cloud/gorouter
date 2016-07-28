@@ -22,7 +22,7 @@ func NewHttpStart(req *http.Request, peerType events.PeerType, requestId *uuid.U
 		RequestId:     NewUUID(requestId),
 		PeerType:      &peerType,
 		Method:        events.Method(events.Method_value[req.Method]).Enum(),
-		Uri:           proto.String(fmt.Sprintf("%s%s", req.Host, req.URL.Path)),
+		Uri:           proto.String(fmt.Sprintf("%s://%s%s", scheme(req), host(req), req.URL.Path)),
 		RemoteAddress: proto.String(req.RemoteAddr),
 		UserAgent:     proto.String(req.UserAgent()),
 	}
@@ -45,7 +45,7 @@ func NewHttpStart(req *http.Request, peerType events.PeerType, requestId *uuid.U
 func NewHttpStop(req *http.Request, statusCode int, contentLength int64, peerType events.PeerType, requestId *uuid.UUID) *events.HttpStop {
 	httpStop := &events.HttpStop{
 		Timestamp:     proto.Int64(time.Now().UnixNano()),
-		Uri:           proto.String(fmt.Sprintf("%s%s", req.Host, req.URL.Path)),
+		Uri:           proto.String(fmt.Sprintf("%s://%s%s", scheme(req), host(req), req.URL.Path)),
 		RequestId:     NewUUID(requestId),
 		PeerType:      &peerType,
 		StatusCode:    proto.Int(statusCode),
@@ -57,6 +57,45 @@ func NewHttpStop(req *http.Request, statusCode int, contentLength int64, peerTyp
 	}
 
 	return httpStop
+}
+
+func NewHttpStartStop(req *http.Request, statusCode int, contentLength int64, peerType events.PeerType, requestId *uuid.UUID) *events.HttpStartStop {
+	now := proto.Int64(time.Now().UnixNano())
+	httpStartStop := &events.HttpStartStop{
+		StartTimestamp: now,
+		StopTimestamp:  now,
+		RequestId:      NewUUID(requestId),
+		PeerType:       &peerType,
+		Method:         events.Method(events.Method_value[req.Method]).Enum(),
+		Uri:            proto.String(fmt.Sprintf("%s://%s%s", scheme(req), host(req), req.URL.Path)),
+		RemoteAddress:  proto.String(req.RemoteAddr),
+		UserAgent:      proto.String(req.UserAgent()),
+		StatusCode:     proto.Int(statusCode),
+		ContentLength:  proto.Int64(contentLength),
+	}
+
+	if applicationId, err := uuid.ParseHex(req.Header.Get("X-CF-ApplicationID")); err == nil {
+		httpStartStop.ApplicationId = NewUUID(applicationId)
+	}
+
+	if instanceIndex, err := strconv.Atoi(req.Header.Get("X-CF-InstanceIndex")); err == nil {
+		httpStartStop.InstanceIndex = proto.Int(instanceIndex)
+	}
+
+	if instanceId := req.Header.Get("X-CF-InstanceID"); instanceId != "" {
+		httpStartStop.InstanceId = &instanceId
+	}
+
+	return httpStartStop
+}
+
+func NewError(source string, code int32, message string) *events.Error {
+	err := &events.Error{
+		Source:  proto.String(source),
+		Code:    proto.Int32(code),
+		Message: proto.String(message),
+	}
+	return err
 }
 
 func NewValueMetric(name string, value float64, unit string) *events.ValueMetric {
@@ -96,4 +135,18 @@ func NewContainerMetric(applicationId string, instanceIndex int32, cpuPercentage
 		MemoryBytes:   &memoryBytes,
 		DiskBytes:     &diskBytes,
 	}
+}
+
+func host(req *http.Request) string {
+	if forwardedFor := req.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		return forwardedFor
+	}
+	return req.Host
+}
+
+func scheme(req *http.Request) string {
+	if req.TLS == nil {
+		return "http"
+	}
+	return "https"
 }

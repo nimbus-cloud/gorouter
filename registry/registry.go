@@ -7,12 +7,11 @@ import (
 	"time"
 	"net"
 
-	steno "github.com/cloudfoundry/gosteno"
-	"github.com/cloudfoundry/yagnats"
-
 	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/route"
 	"github.com/cloudfoundry/gorouter/metrics"
+	"github.com/cloudfoundry/gorouter/route"
+	"github.com/cloudfoundry/yagnats"
+	"github.com/pivotal-golang/lager"
 )
 
 type RegistryInterface interface {
@@ -29,7 +28,7 @@ type RegistryInterface interface {
 type RouteRegistry struct {
 	sync.RWMutex
 
-	logger *steno.Logger
+	logger lager.Logger
 
 	byUri *Trie
 
@@ -38,7 +37,7 @@ type RouteRegistry struct {
 
 	messageBus yagnats.NATSConn
 
-	reporter metrics.RouteReporter
+	reporter metrics.RouteRegistryReporter
 
 	ticker           *time.Ticker
 	timeOfLastUpdate time.Time
@@ -46,11 +45,9 @@ type RouteRegistry struct {
 	preferredNetwork *net.IPNet
 }
 
-func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn, reporter metrics.RouteReporter) *RouteRegistry {
+func NewRouteRegistry(logger lager.Logger, c *config.Config, mbus yagnats.NATSConn, reporter metrics.RouteRegistryReporter) *RouteRegistry {
 	r := &RouteRegistry{}
-
-	r.logger = steno.NewLogger("router.registry")
-
+	r.logger = logger
 	r.byUri = NewTrie()
 
 	r.pruneStaleDropletsInterval = c.PruneStaleDropletsInterval
@@ -65,6 +62,9 @@ func NewRouteRegistry(c *config.Config, mbus yagnats.NATSConn, reporter metrics.
 
 func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 	t := time.Now()
+
+	r.reporter.CaptureRegistryMessage(endpoint)
+
 	r.Lock()
 
 	uri = uri.RouteKey()
@@ -83,6 +83,8 @@ func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 }
 
 func (r *RouteRegistry) Unregister(uri route.Uri, endpoint *route.Endpoint) {
+	r.reporter.CaptureRegistryMessage(endpoint)
+
 	r.Lock()
 
 	uri = uri.RouteKey()
@@ -125,9 +127,9 @@ func (r *RouteRegistry) StartPruningCycle() {
 			for {
 				select {
 				case <-r.ticker.C:
-					r.logger.Debug("Start to check and prune stale droplets")
+					r.logger.Debug("start-pruning-droplets")
 					r.pruneStaleDroplets()
-					msSinceLastUpdate := uint64(time.Since(r.TimeOfLastUpdate())/time.Millisecond)
+					msSinceLastUpdate := uint64(time.Since(r.TimeOfLastUpdate()) / time.Millisecond)
 					r.reporter.CaptureRouteStats(r.NumUris(), msSinceLastUpdate)
 				}
 			}

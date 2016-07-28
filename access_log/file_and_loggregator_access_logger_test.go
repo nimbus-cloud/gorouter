@@ -1,11 +1,17 @@
 package access_log_test
 
 import (
+	"io/ioutil"
+	"os"
+	"path/filepath"
+
 	"github.com/cloudfoundry/dropsonde/log_sender/fake"
 	"github.com/cloudfoundry/dropsonde/logs"
 	. "github.com/cloudfoundry/gorouter/access_log"
 	"github.com/cloudfoundry/gorouter/route"
 	"github.com/cloudfoundry/gorouter/test_util"
+	"github.com/pivotal-golang/lager"
+	"github.com/pivotal-golang/lager/lagertest"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -17,13 +23,20 @@ import (
 
 var _ = Describe("AccessLog", func() {
 
+	var (
+		logger lager.Logger
+	)
 	Context("with a dropsonde source instance", func() {
+
+		BeforeEach(func() {
+			logger = lagertest.NewTestLogger("test")
+
+		})
 		It("logs to dropsonde", func() {
 
 			fakeLogSender := fake.NewFakeLogSender()
 			logs.Initialize(fakeLogSender)
-
-			accessLogger := NewFileAndLoggregatorAccessLogger(nil, "42")
+			accessLogger := NewFileAndLoggregatorAccessLogger(logger, "42")
 			go accessLogger.Run()
 
 			accessLogger.Log(*CreateAccessLogRecord())
@@ -43,7 +56,7 @@ var _ = Describe("AccessLog", func() {
 			fakeLogSender := fake.NewFakeLogSender()
 			logs.Initialize(fakeLogSender)
 
-			accessLogger := NewFileAndLoggregatorAccessLogger(nil, "43")
+			accessLogger := NewFileAndLoggregatorAccessLogger(logger, "43")
 
 			routeEndpoint := route.NewEndpoint("", "127.0.0.1", 4567, "", nil, -1, "")
 
@@ -59,17 +72,30 @@ var _ = Describe("AccessLog", func() {
 
 	})
 
-	Context("with a file", func() {
-		It("writes to the log file", func() {
-			var fakeFile = new(test_util.FakeFile)
+	Context("created with access log file", func() {
+		It("writes to the log file and Stdout", func() {
+			var fakeAccessFile = new(test_util.FakeFile)
+			fname := filepath.Join(os.TempDir(), "stdout")
+			oldStdout := os.Stdout
+			tempStdout, _ := os.Create(fname)
+			defer tempStdout.Close()
+			os.Stdout = tempStdout
+			accessLogger := NewFileAndLoggregatorAccessLogger(logger, "", fakeAccessFile, os.Stdout)
 
-			accessLogger := NewFileAndLoggregatorAccessLogger(fakeFile, "")
 			go accessLogger.Run()
 			accessLogger.Log(*CreateAccessLogRecord())
 
+			os.Stdout = oldStdout
+			var stdoutPayload []byte
+			Eventually(func() int {
+				stdoutPayload, _ = ioutil.ReadFile(fname)
+				return len(stdoutPayload)
+			}).ShouldNot(Equal(0))
+			Expect(string(stdoutPayload)).To(MatchRegexp("^.*foo.bar.*\n"))
+
 			var payload []byte
 			Eventually(func() int {
-				n, _ := fakeFile.Read(&payload)
+				n, _ := fakeAccessFile.Read(&payload)
 				return n
 			}).ShouldNot(Equal(0))
 			Expect(string(payload)).To(MatchRegexp("^.*foo.bar.*\n"))

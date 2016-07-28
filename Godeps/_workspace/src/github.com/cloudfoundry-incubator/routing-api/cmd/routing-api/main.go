@@ -43,7 +43,9 @@ func route(f func(w http.ResponseWriter, r *http.Request)) http.Handler {
 }
 
 func main() {
-	logger := cf_lager.New("routing-api")
+	flag.Parse()
+	cf_lager.AddFlags(flag.CommandLine)
+	logger, reconfigurableSink := cf_lager.New("routing-api")
 
 	err := checkFlags()
 	if err != nil {
@@ -51,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := config.NewConfigFromFile(*configPath)
+	cfg, err := config.NewConfigFromFile(*configPath, *devMode)
 	if err != nil {
 		logger.Error("failed to start", err)
 		os.Exit(1)
@@ -64,7 +66,7 @@ func main() {
 	}
 
 	if cfg.DebugAddress != "" {
-		cf_debug_server.Run(cfg.DebugAddress)
+		cf_debug_server.Run(cfg.DebugAddress, reconfigurableSink)
 	}
 
 	database, err := initializeDatabase(cfg, logger)
@@ -148,24 +150,30 @@ func constructRouteRegister(logGuid string, database db.DB, logger lager.Logger)
 }
 
 func constructApiServer(cfg config.Config, database db.DB, statsdClient statsd.Statter, stopChan chan struct{}, logger lager.Logger) ifrit.Runner {
-	var token authentication.Token
+	var tokenValidator authentication.TokenValidator
 
 	if *devMode {
-		token = authentication.NullToken{}
+		tokenValidator = authentication.NullTokenValidator{}
 	} else {
-		token = authentication.NewAccessToken(cfg.UAAPublicKey)
-		err := token.CheckPublicToken()
+		uaaKeyFetcher := authentication.NewUaaKeyFetcher(logger, cfg.UAAEndpoint+"/token_key")
+		uaaPublicKey, err := uaaKeyFetcher.FetchKey()
 		if err != nil {
-			logger.Error("failed to check public token", err)
+			logger.Error("Failed to get verification key from UAA", err)
+			os.Exit(1)
+		}
+		tokenValidator = authentication.NewAccessTokenValidator(logger, uaaPublicKey, uaaKeyFetcher)
+		err = tokenValidator.CheckPublicToken()
+		if err != nil {
+			logger.Error("Failed to check public token", err)
 			os.Exit(1)
 		}
 	}
 
 	validator := handlers.NewValidator()
-	routesHandler := handlers.NewRoutesHandler(token, *maxTTL, validator, database, logger)
-	eventStreamHandler := handlers.NewEventStreamHandler(token, database, logger, statsdClient, stopChan)
-	routeGroupsHandler := handlers.NewRouteGroupsHandler(token, logger)
-	tcpMappingsHandler := handlers.NewTcpRouteMappingsHandler(token, validator, database, logger)
+	routesHandler := handlers.NewRoutesHandler(tokenValidator, *maxTTL, validator, database, logger)
+	eventStreamHandler := handlers.NewEventStreamHandler(tokenValidator, database, logger, statsdClient, stopChan)
+	routeGroupsHandler := handlers.NewRouteGroupsHandler(tokenValidator, logger)
+	tcpMappingsHandler := handlers.NewTcpRouteMappingsHandler(tokenValidator, validator, database, logger)
 
 	actions := rata.Handlers{
 		routing_api.UpsertRoute:           route(routesHandler.Upsert),
@@ -174,7 +182,9 @@ func constructApiServer(cfg config.Config, database db.DB, statsdClient statsd.S
 		routing_api.EventStreamRoute:      route(eventStreamHandler.EventStream),
 		routing_api.ListRouterGroups:      route(routeGroupsHandler.ListRouterGroups),
 		routing_api.UpsertTcpRouteMapping: route(tcpMappingsHandler.Upsert),
+		routing_api.DeleteTcpRouteMapping: route(tcpMappingsHandler.Delete),
 		routing_api.ListTcpRouteMapping:   route(tcpMappingsHandler.List),
+		routing_api.EventStreamTcpRoute:   route(eventStreamHandler.TcpEventStream),
 	}
 
 	handler, err := rata.NewRouter(routing_api.Routes, actions)
@@ -198,7 +208,6 @@ func initializeDatabase(cfg config.Config, logger lager.Logger) (db.DB, error) {
 }
 
 func checkFlags() error {
-	flag.Parse()
 	if *configPath == "" {
 		return errors.New("No configuration file provided")
 	}

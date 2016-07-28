@@ -4,11 +4,12 @@ import (
 	. "github.com/cloudfoundry/gorouter/registry"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/pivotal-golang/lager/lagertest"
 
 	"github.com/cloudfoundry/gorouter/config"
+	"github.com/cloudfoundry/gorouter/metrics/fakes"
 	"github.com/cloudfoundry/gorouter/route"
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
 
 	"encoding/json"
 	"time"
@@ -17,20 +18,22 @@ import (
 var _ = Describe("RouteRegistry", func() {
 	var r *RouteRegistry
 	var messageBus *fakeyagnats.FakeNATSConn
-	var reporter *fakes.FakeRouteReporter
+	var reporter *fakes.FakeRouteRegistryReporter
 
 	var fooEndpoint, barEndpoint, bar2Endpoint *route.Endpoint
 	var configObj *config.Config
 
 	BeforeEach(func() {
+
+		logger := lagertest.NewTestLogger("test")
 		configObj = config.DefaultConfig()
 		configObj.PruneStaleDropletsInterval = 50 * time.Millisecond
 		configObj.DropletStaleThreshold = 10 * time.Millisecond
 
 		messageBus = fakeyagnats.Connect()
-		reporter = new(fakes.FakeRouteReporter)
+		reporter = new(fakes.FakeRouteRegistryReporter)
 
-		r = NewRouteRegistry(configObj, messageBus, reporter)
+		r = NewRouteRegistry(logger, configObj, messageBus, reporter)
 		fooEndpoint = route.NewEndpoint("12345", "192.168.1.1", 1234,
 			"id1", map[string]string{
 				"runtime":   "ruby18",
@@ -51,6 +54,11 @@ var _ = Describe("RouteRegistry", func() {
 	})
 
 	Context("Register", func() {
+		It("emits message_count metrics", func() {
+			r.Register("foo", fooEndpoint)
+			Expect(reporter.CaptureRegistryMessageCallCount()).To(Equal(1))
+		})
+
 		Context("uri", func() {
 			It("records and tracks time of last update", func() {
 				r.Register("foo", fooEndpoint)
@@ -138,6 +146,11 @@ var _ = Describe("RouteRegistry", func() {
 	})
 
 	Context("Unregister", func() {
+		It("emits message_count metrics", func() {
+			r.Unregister("foo", fooEndpoint)
+			Expect(reporter.CaptureRegistryMessageCallCount()).To(Equal(1))
+		})
+
 		It("Handles unknown URIs", func() {
 			r.Unregister("bar", barEndpoint)
 			Expect(r.NumUris()).To(Equal(0))
@@ -370,7 +383,7 @@ var _ = Describe("RouteRegistry", func() {
 			Expect(r.NumEndpoints()).To(Equal(0))
 
 			marshalled, err := json.Marshal(r)
-			Ω(err).NotTo(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(string(marshalled)).To(Equal(`{}`))
 		})
 
@@ -391,7 +404,7 @@ var _ = Describe("RouteRegistry", func() {
 			r.Register("foo", endpoint)
 
 			r.StopPruningCycle()
-			Expect(r.NumUris()).To(Equal(1))
+			Eventually(r.NumUris).Should(Equal(1))
 			Expect(r.NumEndpoints()).To(Equal(1))
 
 			p := r.Lookup("foo")
@@ -420,14 +433,14 @@ var _ = Describe("RouteRegistry", func() {
 		It("sends route metrics to the reporter", func() {
 			r.StartPruningCycle()
 
-			time.Sleep(configObj.PruneStaleDropletsInterval - configObj.DropletStaleThreshold / 2)
+			time.Sleep(configObj.PruneStaleDropletsInterval - configObj.DropletStaleThreshold/2)
 			r.Register("foo", fooEndpoint)
 			r.Register("fooo", fooEndpoint)
 
 			Eventually(reporter.CaptureRouteStatsCallCount).Should(Equal(1))
 			totalRoutes, timeSinceLastUpdate := reporter.CaptureRouteStatsArgsForCall(0)
 			Expect(totalRoutes).To(Equal(2))
-			Expect(timeSinceLastUpdate).To(BeNumerically("~",  5, 5))
+			Expect(timeSinceLastUpdate).To(BeNumerically("~", 5, 5))
 		})
 	})
 
@@ -460,8 +473,8 @@ var _ = Describe("RouteRegistry", func() {
 			t := r.TimeOfLastUpdate()
 			end := time.Now()
 
-			Expect(start.Before(t)).To(BeTrue())
-			Expect(end.After(t)).To(BeTrue())
+			Expect(t.Before(start)).To(BeFalse())
+			Expect(t.After(end)).To(BeFalse())
 		})
 	})
 
@@ -470,11 +483,11 @@ var _ = Describe("RouteRegistry", func() {
 		r.Register("foo", m)
 
 		marshalled, err := json.Marshal(r)
-		Ω(err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
 		Expect(string(marshalled)).To(Equal(`{"foo":[{"address":"192.168.1.1:1234","ttl":-1,"route_service_url":"https://my-routeService.com"}]}`))
 		r.Unregister("foo", m)
 		marshalled, err = json.Marshal(r)
-		Ω(err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
 		Expect(string(marshalled)).To(Equal(`{}`))
 	})
 })

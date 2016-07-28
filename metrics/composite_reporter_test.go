@@ -1,21 +1,21 @@
 package metrics_test
 
 import (
-
+	"github.com/cloudfoundry/gorouter/metrics/fakes"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
 
 	"net/http"
+	"time"
+
 	"github.com/cloudfoundry/gorouter/metrics"
 	"github.com/cloudfoundry/gorouter/route"
-	"time"
 )
 
 var _ = Describe("CompositeReporter", func() {
 
-	var fakeReporter1 *fakes.FakeReporter
-	var fakeReporter2 *fakes.FakeReporter
+	var fakeReporter1 *fakes.FakeProxyReporter
+	var fakeReporter2 *fakes.FakeProxyReporter
 	var composite metrics.ProxyReporter
 
 	var req *http.Request
@@ -25,13 +25,13 @@ var _ = Describe("CompositeReporter", func() {
 	var responseDuration time.Duration
 
 	BeforeEach(func() {
-		fakeReporter1 = new(fakes.FakeReporter)
-		fakeReporter2 = new(fakes.FakeReporter)
+		fakeReporter1 = new(fakes.FakeProxyReporter)
+		fakeReporter2 = new(fakes.FakeProxyReporter)
 
 		composite = metrics.NewCompositeReporter(fakeReporter1, fakeReporter2)
 		req, _ = http.NewRequest("GET", "https://example.com", nil)
 		endpoint = route.NewEndpoint("someId", "host", 2222, "privateId", map[string]string{}, 30, "")
-		response = &http.Response{ StatusCode: 200 }
+		response = &http.Response{StatusCode: 200}
 		responseTime = time.Now()
 		responseDuration = time.Second
 	})

@@ -9,21 +9,24 @@ import (
 	"github.com/cloudfoundry/gorouter/varz"
 
 	"github.com/cloudfoundry/yagnats/fakeyagnats"
+	"github.com/pivotal-golang/lager/lagertest"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
 	"strconv"
+
 	"github.com/cloudfoundry/gorouter/metrics/fakes"
 )
 
 var _ = Describe("AccessLogRecord", func() {
 	Measure("Register", func(b Benchmarker) {
+		logger := lagertest.NewTestLogger("test")
 		c := config.DefaultConfig()
 		mbus := fakeyagnats.Connect()
-		r := registry.NewRouteRegistry(c, mbus, new(fakes.FakeRouteReporter))
+		r := registry.NewRouteRegistry(logger, c, mbus, new(fakes.FakeRouteRegistryReporter))
 
-		accesslog, err := access_log.CreateRunningAccessLogger(c)
+		accesslog, err := access_log.CreateRunningAccessLogger(logger, c)
 		Expect(err).ToNot(HaveOccurred())
 
 		proxy.NewProxy(proxy.ProxyArgs{

@@ -11,56 +11,62 @@ import (
 	"time"
 
 	"github.com/cloudfoundry/gorouter/access_log"
-	"github.com/cloudfoundry/gorouter/common"
 	router_http "github.com/cloudfoundry/gorouter/common/http"
+	"github.com/cloudfoundry/gorouter/metrics"
 	"github.com/cloudfoundry/gorouter/route"
-	steno "github.com/cloudfoundry/gosteno"
-"github.com/cloudfoundry/gorouter/metrics"
+	"github.com/pivotal-golang/lager"
 )
 
 type RequestHandler struct {
-	StenoLogger *steno.Logger
-	reporter    metrics.ProxyReporter
-	logrecord   *access_log.AccessLogRecord
+	logger    lager.Logger
+	reporter  metrics.ProxyReporter
+	logrecord *access_log.AccessLogRecord
 
 	request  *http.Request
 	response ProxyResponseWriter
 }
 
-func NewRequestHandler(request *http.Request, response ProxyResponseWriter, r metrics.ProxyReporter,
-	alr *access_log.AccessLogRecord) RequestHandler {
+func NewRequestHandler(request *http.Request, response ProxyResponseWriter, r metrics.ProxyReporter, alr *access_log.AccessLogRecord, logger lager.Logger) RequestHandler {
+	requestLogger := setupLogger(request, logger)
 	return RequestHandler{
-		StenoLogger: createLogger(request),
-		reporter:    r,
-		logrecord:   alr,
-
-		request:  request,
-		response: response,
+		logger:    requestLogger,
+		reporter:  r,
+		logrecord: alr,
+		request:   request,
+		response:  response,
 	}
 }
 
-func createLogger(request *http.Request) *steno.Logger {
-	logger := steno.NewLogger("router.proxy.request-handler")
-
-	logger.Set("RemoteAddr", request.RemoteAddr)
-	logger.Set("Host", request.Host)
-	logger.Set("Path", request.URL.Path)
-	logger.Set("X-Forwarded-For", request.Header["X-Forwarded-For"])
-	logger.Set("X-Forwarded-Proto", request.Header["X-Forwarded-Proto"])
-
-	return logger
+func setupLogger(request *http.Request, logger lager.Logger) lager.Logger {
+	return logger.Session("request-handler", lager.Data{
+		"RemoteAddr":        request.RemoteAddr,
+		"Host":              request.Host,
+		"Path":              request.URL.Path,
+		"X-Forwarded-For":   request.Header["X-Forwarded-For"],
+		"X-Forwarded-Proto": request.Header["X-Forwarded-Proto"],
+	})
 }
 
-func (h *RequestHandler) Logger() *steno.Logger {
-	return h.StenoLogger
+func (h *RequestHandler) Logger() lager.Logger {
+	return h.logger
 }
 
-func (h *RequestHandler) HandleHeartbeat() {
+func (h *RequestHandler) AddLoggingData(data lager.Data) {
+	withData := h.logger.WithData(data)
+	h.logger = withData
+}
+
+func (h *RequestHandler) HandleHeartbeat(ok bool) {
 	h.response.Header().Set("Cache-Control", "private, max-age=0")
 	h.response.Header().Set("Expires", "0")
-	h.logrecord.StatusCode = http.StatusOK
-	h.response.WriteHeader(http.StatusOK)
-	h.response.Write([]byte("ok\n"))
+	if ok {
+		h.logrecord.StatusCode = http.StatusOK
+		h.response.WriteHeader(http.StatusOK)
+		h.response.Write([]byte("ok\n"))
+	} else {
+		h.logrecord.StatusCode = http.StatusServiceUnavailable
+		h.response.WriteHeader(http.StatusServiceUnavailable)
+	}
 	h.request.Close = true
 }
 
@@ -79,16 +85,20 @@ func (h *RequestHandler) HandleUnsupportedProtocol() {
 }
 
 func (h *RequestHandler) HandleMissingRoute() {
-	h.StenoLogger.Warnf("proxy.endpoint.not-found")
+	h.logger.Info("unknown-route")
 
 	h.response.Header().Set("X-Cf-RouterError", "unknown_route")
-	message := fmt.Sprintf("Requested route ('%s') does not exist.", h.request.Host)
+	var message string
+	if ValidHost(h.request.Host) {
+		message = fmt.Sprintf("Requested route ('%s') does not exist.", h.request.Host)
+	} else {
+		message = fmt.Sprintf("Requested route does not exist.")
+	}
 	h.writeStatus(http.StatusNotFound, message)
 }
 
 func (h *RequestHandler) HandleBadGateway(err error) {
-	h.StenoLogger.Set("Error", err.Error())
-	h.StenoLogger.Warnf("proxy.endpoint.failed")
+	h.logger.Error("endpoint-failed", err)
 
 	h.response.Header().Set("X-Cf-RouterError", "endpoint_failure")
 	h.writeStatus(http.StatusBadGateway, "Registered endpoint failed to handle the request.")
@@ -96,23 +106,21 @@ func (h *RequestHandler) HandleBadGateway(err error) {
 }
 
 func (h *RequestHandler) HandleBadSignature(err error) {
-	h.StenoLogger.Set("Error", err.Error())
-	h.StenoLogger.Warnf("proxy.signature.validation.failed")
+	h.logger.Error("signature-validation-failed", err)
 
 	h.writeStatus(http.StatusBadRequest, "Failed to validate Route Service Signature")
 	h.response.Done()
 }
 
 func (h *RequestHandler) HandleRouteServiceFailure(err error) {
-	h.StenoLogger.Set("Error", err.Error())
-	h.StenoLogger.Warnf("proxy.route-service.failed")
+	h.logger.Error("route-service-failed", err)
 
 	h.writeStatus(http.StatusInternalServerError, "Route service request failed.")
 	h.response.Done()
 }
 
 func (h *RequestHandler) HandleUnsupportedRouteService() {
-	h.StenoLogger.Warnf("proxy.route-service.unsupported")
+	h.logger.Info("route-service-unsupported")
 
 	h.response.Header().Set("X-Cf-RouterError", "route_service_unsupported")
 	h.writeStatus(http.StatusBadGateway, "Support for route services is disabled.")
@@ -120,23 +128,25 @@ func (h *RequestHandler) HandleUnsupportedRouteService() {
 }
 
 func (h *RequestHandler) HandleTcpRequest(iter route.EndpointIterator) {
-	h.StenoLogger.Set("Upgrade", "tcp")
+	h.logger.Info("handling-tcp-request", lager.Data{"Upgrade": "tcp"})
 
 	h.logrecord.StatusCode = http.StatusSwitchingProtocols
 
 	err := h.serveTcp(iter)
 	if err != nil {
+		h.logger.Error("tcp-request-failed", err)
 		h.writeStatus(http.StatusBadRequest, "TCP forwarding to endpoint failed.")
 	}
 }
 
 func (h *RequestHandler) HandleWebSocketRequest(iter route.EndpointIterator) {
-	h.StenoLogger.Set("Upgrade", "websocket")
+	h.logger.Info("handling-websocket-request", lager.Data{"Upgrade": "websocket"})
 
 	h.logrecord.StatusCode = http.StatusSwitchingProtocols
 
 	err := h.serveWebSocket(iter)
 	if err != nil {
+		h.logger.Error("websocket-request-failed", err)
 		h.writeStatus(http.StatusBadRequest, "WebSocket request to endpoint failed.")
 	}
 }
@@ -144,7 +154,7 @@ func (h *RequestHandler) HandleWebSocketRequest(iter route.EndpointIterator) {
 func (h *RequestHandler) writeStatus(code int, message string) {
 	body := fmt.Sprintf("%d %s: %s", code, http.StatusText(code), message)
 
-	h.StenoLogger.Warn(body)
+	h.logger.Info("status", lager.Data{"body": body})
 	h.logrecord.StatusCode = code
 
 	http.Error(h.response, body, code)
@@ -185,9 +195,7 @@ func (h *RequestHandler) serveTcp(iter route.EndpointIterator) error {
 		}
 
 		iter.EndpointFailed()
-
-		h.StenoLogger.Set("Error", err.Error())
-		h.StenoLogger.Warn("proxy.tcp.failed")
+		h.logger.Error("tcp-connection-failed", err)
 
 		retry++
 		if retry == maxRetries {
@@ -235,9 +243,7 @@ func (h *RequestHandler) serveWebSocket(iter route.EndpointIterator) error {
 		}
 
 		iter.EndpointFailed()
-
-		h.StenoLogger.Set("Error", err.Error())
-		h.StenoLogger.Warn("proxy.websocket.failed")
+		h.logger.Error("websocket-connection-failed", err)
 
 		retry++
 		if retry == maxRetries {
@@ -260,7 +266,6 @@ func (h *RequestHandler) setupRequest(endpoint *route.Endpoint) {
 	h.setRequestURL(endpoint.CanonicalAddr())
 	h.setRequestXForwardedFor()
 	setRequestXRequestStart(h.request)
-	setRequestXVcapRequestId(h.request, h.StenoLogger)
 }
 
 func (h *RequestHandler) setRequestURL(addr string) {
@@ -283,16 +288,6 @@ func (h *RequestHandler) setRequestXForwardedFor() {
 func setRequestXRequestStart(request *http.Request) {
 	if _, ok := request.Header[http.CanonicalHeaderKey("X-Request-Start")]; !ok {
 		request.Header.Set("X-Request-Start", strconv.FormatInt(time.Now().UnixNano()/1e6, 10))
-	}
-}
-
-func setRequestXVcapRequestId(request *http.Request, logger *steno.Logger) {
-	uuid, err := common.GenerateUUID()
-	if err == nil {
-		request.Header.Set(router_http.VcapRequestIdHeader, uuid)
-		if logger != nil {
-			logger.Set(router_http.VcapRequestIdHeader, uuid)
-		}
 	}
 }
 

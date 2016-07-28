@@ -5,17 +5,14 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/cloudfoundry-incubator/candiedyaml"
-	token_fetcher "github.com/cloudfoundry-incubator/uaa-token-fetcher"
-	steno "github.com/cloudfoundry/gosteno"
-	"github.com/pivotal-golang/localip"
-
 	"io/ioutil"
 	"runtime"
-	"strconv"
 	"strings"
 	"net"
 	"time"
+
+	"github.com/cloudfoundry-incubator/candiedyaml"
+	"github.com/pivotal-golang/localip"
 )
 
 type StatusConfig struct {
@@ -50,6 +47,14 @@ var defaultNatsConfig = NatsConfig{
 	Pass: "",
 }
 
+type OAuthConfig struct {
+	TokenEndpoint            string `yaml:"token_endpoint"`
+	Port                     int    `yaml:"port"`
+	SkipOAuthTLSVerification bool   `yaml:"skip_oauth_tls_verification"`
+	ClientName               string `yaml:"client_name"`
+	ClientSecret             string `yaml:"client_secret"`
+}
+
 type LoggingConfig struct {
 	File               string `yaml:"file"`
 	Syslog             string `yaml:"syslog"`
@@ -61,29 +66,34 @@ type LoggingConfig struct {
 	JobName string `yaml:"-"`
 }
 
+type AccessLog struct {
+	File            string `yaml:"file"`
+	EnableStreaming bool   `yaml:"enable_streaming"`
+}
+
 var defaultLoggingConfig = LoggingConfig{
 	Level:         "debug",
 	MetronAddress: "localhost:3457",
 }
 
 type Config struct {
-	Status  StatusConfig  `yaml:"status"`
-	Nats    []NatsConfig  `yaml:"nats"`
-	Logging LoggingConfig `yaml:"logging"`
-
-	Port              uint16 `yaml:"port"`
-	Index             uint   `yaml:"index"`
-	Zone              string `yaml:"zone"`
-	GoMaxProcs        int    `yaml:"go_max_procs,omitempty"`
-	TraceKey          string `yaml:"trace_key"`
-	AccessLog         string `yaml:"access_log"`
-	DebugAddr         string `yaml:"debug_addr"`
-	EnableSSL         bool   `yaml:"enable_ssl"`
-	SSLPort           uint16 `yaml:"ssl_port"`
-	SSLCertPath       string `yaml:"ssl_cert_path"`
-	SSLKeyPath        string `yaml:"ssl_key_path"`
-	SSLCertificate    tls.Certificate
-	SSLSkipValidation bool `yaml:"ssl_skip_validation"`
+	Status                   StatusConfig  `yaml:"status"`
+	Nats                     []NatsConfig  `yaml:"nats"`
+	Logging                  LoggingConfig `yaml:"logging"`
+	Port                     uint16        `yaml:"port"`
+	Index                    uint          `yaml:"index"`
+	Zone                     string        `yaml:"zone"`
+	GoMaxProcs               int           `yaml:"go_max_procs,omitempty"`
+	TraceKey                 string        `yaml:"trace_key"`
+	AccessLog                AccessLog     `yaml:"access_log"`
+	EnableAccessLogStreaming bool          `yaml:"enable_access_log_streaming"`
+	DebugAddr                string        `yaml:"debug_addr"`
+	EnableSSL                bool          `yaml:"enable_ssl"`
+	SSLPort                  uint16        `yaml:"ssl_port"`
+	SSLCertPath              string        `yaml:"ssl_cert_path"`
+	SSLKeyPath               string        `yaml:"ssl_key_path"`
+	SSLCertificate           tls.Certificate
+	SSLSkipValidation        bool `yaml:"ssl_skip_validation"`
 
 	CipherString string `yaml:"cipher_suites"`
 	CipherSuites []uint16
@@ -94,16 +104,17 @@ type Config struct {
 	PublishActiveAppsIntervalInSeconds   int `yaml:"publish_active_apps_interval"`
 	StartResponseDelayIntervalInSeconds  int `yaml:"start_response_delay_interval"`
 	EndpointTimeoutInSeconds             int `yaml:"endpoint_timeout"`
-	RouteServiceTimeoutInSeconds         int `yaml:"route_service_timeout"`
+	RouteServiceTimeoutInSeconds         int `yaml:"route_services_timeout"`
 
+	DrainWaitInSeconds    int  `yaml:"drain_wait,omitempty"`
 	DrainTimeoutInSeconds int  `yaml:"drain_timeout,omitempty"`
 	SecureCookies         bool `yaml:"secure_cookies"`
 
-	OAuth                  token_fetcher.OAuthConfig `yaml:"oauth"`
-	RoutingApi             RoutingApiConfig          `yaml:"routing_api"`
-	RouteServiceSecret     string                    `yaml:"route_services_secret"`
-	RouteServiceSecretPrev string                    `yaml:"route_services_secret_decrypt_only"`
-
+	OAuth                      OAuthConfig      `yaml:"oauth"`
+	RoutingApi                 RoutingApiConfig `yaml:"routing_api"`
+	RouteServiceSecret         string           `yaml:"route_services_secret"`
+	RouteServiceSecretPrev     string           `yaml:"route_services_secret_decrypt_only"`
+	RouteServiceRecommendHttps bool             `yaml:"route_services_recommend_https"`
 	// These fields are populated by the `Process` function.
 	PruneStaleDropletsInterval time.Duration `yaml:"-"`
 	DropletStaleThreshold      time.Duration `yaml:"-"`
@@ -111,11 +122,19 @@ type Config struct {
 	StartResponseDelayInterval time.Duration `yaml:"-"`
 	EndpointTimeout            time.Duration `yaml:"-"`
 	RouteServiceTimeout        time.Duration `yaml:"-"`
+	DrainWait                  time.Duration `yaml:"-"`
 	DrainTimeout               time.Duration `yaml:"-"`
 	Ip                         string        `yaml:"-"`
 	RouteServiceEnabled        bool          `yaml:"-"`
+	TokenFetcherRetryInterval  time.Duration `yaml:"-"`
 
 	ExtraHeadersToLog []string `yaml:"extra_headers_to_log"`
+
+	TokenFetcherMaxRetries                    uint32 `yaml:"token_fetcher_max_retries"`
+	TokenFetcherRetryIntervalInSeconds        int    `yaml:"token_fetcher_retry_interval"`
+	TokenFetcherExpirationBufferTimeInSeconds int64  `yaml:"token_fetcher_expiration_buffer_time"`
+
+	PidFile string `yaml:"pid_file"`
 
 	PreferredNetworkAsString string `yaml:"preferred_network"`
 	PreferredNetwork *net.IPNet
@@ -135,17 +154,20 @@ var defaultConfig = Config{
 	EndpointTimeoutInSeconds:     60,
 	RouteServiceTimeoutInSeconds: 60,
 
-	PublishStartMessageIntervalInSeconds: 30,
-	PruneStaleDropletsIntervalInSeconds:  30,
-	DropletStaleThresholdInSeconds:       120,
-	PublishActiveAppsIntervalInSeconds:   0,
-	StartResponseDelayIntervalInSeconds:  5,
-	PreferredNetworkAsString:             "",
+	PublishStartMessageIntervalInSeconds:      30,
+	PruneStaleDropletsIntervalInSeconds:       30,
+	DropletStaleThresholdInSeconds:            120,
+	PublishActiveAppsIntervalInSeconds:        0,
+	StartResponseDelayIntervalInSeconds:       5,
+	TokenFetcherMaxRetries:                    3,
+	TokenFetcherRetryIntervalInSeconds:        5,
+	TokenFetcherExpirationBufferTimeInSeconds: 30,
+
+	PreferredNetworkAsString:             	   "",
 }
 
 func DefaultConfig() *Config {
 	c := defaultConfig
-
 	c.Process()
 
 	return &c
@@ -164,7 +186,8 @@ func (c *Config) Process() {
 	c.StartResponseDelayInterval = time.Duration(c.StartResponseDelayIntervalInSeconds) * time.Second
 	c.EndpointTimeout = time.Duration(c.EndpointTimeoutInSeconds) * time.Second
 	c.RouteServiceTimeout = time.Duration(c.RouteServiceTimeoutInSeconds) * time.Second
-	c.Logging.JobName = "router_" + c.Zone + "_" + strconv.Itoa(int(c.Index))
+	c.TokenFetcherRetryInterval = time.Duration(c.TokenFetcherRetryIntervalInSeconds) * time.Second
+	c.Logging.JobName = "gorouter"
 
 	if c.PreferredNetworkAsString != "" {
 		_, c.PreferredNetwork, err = net.ParseCIDR(c.PreferredNetworkAsString)
@@ -174,18 +197,19 @@ func (c *Config) Process() {
 	} else {
 		c.PreferredNetwork = nil
 	}
-	
+
 	if c.StartResponseDelayInterval > c.DropletStaleThreshold {
 		c.DropletStaleThreshold = c.StartResponseDelayInterval
-		log := steno.NewLogger("config.logger")
-		log.Warnf("DropletStaleThreshold (%s) cannot be less than StartResponseDelayInterval (%s); setting both equal to StartResponseDelayInterval and continuing", c.DropletStaleThreshold, c.StartResponseDelayInterval)
 	}
 
-	drain := c.DrainTimeoutInSeconds
-	if drain == 0 {
-		drain = c.EndpointTimeoutInSeconds
+	c.DrainTimeout = c.EndpointTimeout
+	if c.DrainTimeoutInSeconds > 0 {
+		c.DrainTimeout = time.Duration(c.DrainTimeoutInSeconds) * time.Second
 	}
-	c.DrainTimeout = time.Duration(drain) * time.Second
+
+	if c.DrainWaitInSeconds > 0 {
+		c.DrainWait = time.Duration(c.DrainWaitInSeconds) * time.Second
+	}
 
 	c.Ip, err = localip.LocalIP()
 	if err != nil {
@@ -208,37 +232,20 @@ func (c *Config) Process() {
 
 func (c *Config) processCipherSuites() []uint16 {
 	cipherMap := map[string]uint16{
-		"TLS_RSA_WITH_RC4_128_SHA":                0x0005,
 		"TLS_RSA_WITH_AES_128_CBC_SHA":            0x002f,
 		"TLS_RSA_WITH_AES_256_CBC_SHA":            0x0035,
-		"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA":        0xc007,
 		"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":    0xc009,
 		"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":    0xc00a,
-		"TLS_ECDHE_RSA_WITH_RC4_128_SHA":          0xc011,
 		"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":      0xc013,
 		"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":      0xc014,
 		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256":   0xc02f,
 		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256": 0xc02b,
 	}
 
-	defaultCiphers := []string{
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_RSA_WITH_RC4_128_SHA",
-		"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA",
-		"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
-		"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
-		"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
-		"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
-		"TLS_RSA_WITH_RC4_128_SHA",
-		"TLS_RSA_WITH_AES_128_CBC_SHA",
-		"TLS_RSA_WITH_AES_256_CBC_SHA",
-	}
-
 	var ciphers []string
 
 	if len(strings.TrimSpace(c.CipherString)) == 0 {
-		ciphers = defaultCiphers
+		panic("must specify list of cipher suite when ssl is enabled")
 	} else {
 		ciphers = strings.Split(c.CipherString, ":")
 	}

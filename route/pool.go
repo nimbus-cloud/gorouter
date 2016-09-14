@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/routing-api/models"
+	"strings"
 )
 
 var random = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -124,7 +125,8 @@ func (p *Pool) Put(endpoint *Endpoint) bool {
 		p.endpoints = append(p.endpoints, e)
 
 		if p.preferred_network != nil {
-			if p.preferred_network.Contains(net.ParseIP(endpoint.Host)) {
+			hostIp := strings.Split(endpoint.addr, ":")[0]
+			if p.preferred_network.Contains(net.ParseIP(hostIp)) {
 				e.preferred_index = len(p.preferred_endpoints)
 				p.preferred_endpoints = append(p.preferred_endpoints, e)
 			}

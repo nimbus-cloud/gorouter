@@ -6,13 +6,13 @@ import (
 	"net/url"
 
 	"io/ioutil"
+	"net"
 	"runtime"
 	"strings"
-	"net"
 	"time"
 
-	"github.com/cloudfoundry-incubator/candiedyaml"
-	"github.com/pivotal-golang/localip"
+	"code.cloudfoundry.org/localip"
+	"gopkg.in/yaml.v2"
 )
 
 type StatusConfig struct {
@@ -48,11 +48,12 @@ var defaultNatsConfig = NatsConfig{
 }
 
 type OAuthConfig struct {
-	TokenEndpoint            string `yaml:"token_endpoint"`
-	Port                     int    `yaml:"port"`
-	SkipOAuthTLSVerification bool   `yaml:"skip_oauth_tls_verification"`
-	ClientName               string `yaml:"client_name"`
-	ClientSecret             string `yaml:"client_secret"`
+	TokenEndpoint     string `yaml:"token_endpoint"`
+	Port              int    `yaml:"port"`
+	SkipSSLValidation bool   `yaml:"skip_ssl_validation"`
+	ClientName        string `yaml:"client_name"`
+	ClientSecret      string `yaml:"client_secret"`
+	CACerts           string `yaml:"ca_certs"`
 }
 
 type LoggingConfig struct {
@@ -88,23 +89,25 @@ type Config struct {
 	AccessLog                AccessLog     `yaml:"access_log"`
 	EnableAccessLogStreaming bool          `yaml:"enable_access_log_streaming"`
 	DebugAddr                string        `yaml:"debug_addr"`
+	EnablePROXY              bool          `yaml:"enable_proxy"`
 	EnableSSL                bool          `yaml:"enable_ssl"`
 	SSLPort                  uint16        `yaml:"ssl_port"`
 	SSLCertPath              string        `yaml:"ssl_cert_path"`
 	SSLKeyPath               string        `yaml:"ssl_key_path"`
 	SSLCertificate           tls.Certificate
-	SSLSkipValidation        bool `yaml:"ssl_skip_validation"`
+	SkipSSLValidation        bool `yaml:"skip_ssl_validation"`
 
 	CipherString string `yaml:"cipher_suites"`
 	CipherSuites []uint16
 
-	PublishStartMessageIntervalInSeconds int `yaml:"publish_start_message_interval"`
-	PruneStaleDropletsIntervalInSeconds  int `yaml:"prune_stale_droplets_interval"`
-	DropletStaleThresholdInSeconds       int `yaml:"droplet_stale_threshold"`
-	PublishActiveAppsIntervalInSeconds   int `yaml:"publish_active_apps_interval"`
-	StartResponseDelayIntervalInSeconds  int `yaml:"start_response_delay_interval"`
-	EndpointTimeoutInSeconds             int `yaml:"endpoint_timeout"`
-	RouteServiceTimeoutInSeconds         int `yaml:"route_services_timeout"`
+	PublishStartMessageIntervalInSeconds int  `yaml:"publish_start_message_interval"`
+	SuspendPruningIfNatsUnavailable      bool `yaml:"suspend_pruning_if_nats_unavailable"`
+	PruneStaleDropletsIntervalInSeconds  int  `yaml:"prune_stale_droplets_interval"`
+	DropletStaleThresholdInSeconds       int  `yaml:"droplet_stale_threshold"`
+	PublishActiveAppsIntervalInSeconds   int  `yaml:"publish_active_apps_interval"`
+	StartResponseDelayIntervalInSeconds  int  `yaml:"start_response_delay_interval"`
+	EndpointTimeoutInSeconds             int  `yaml:"endpoint_timeout"`
+	RouteServiceTimeoutInSeconds         int  `yaml:"route_services_timeout"`
 
 	DrainWaitInSeconds    int  `yaml:"drain_wait,omitempty"`
 	DrainTimeoutInSeconds int  `yaml:"drain_timeout,omitempty"`
@@ -127,6 +130,7 @@ type Config struct {
 	Ip                         string        `yaml:"-"`
 	RouteServiceEnabled        bool          `yaml:"-"`
 	TokenFetcherRetryInterval  time.Duration `yaml:"-"`
+	NatsClientPingInterval     time.Duration `yaml:"-"`
 
 	ExtraHeadersToLog []string `yaml:"extra_headers_to_log"`
 
@@ -137,7 +141,7 @@ type Config struct {
 	PidFile string `yaml:"pid_file"`
 
 	PreferredNetworkAsString string `yaml:"preferred_network"`
-	PreferredNetwork *net.IPNet
+	PreferredNetwork         *net.IPNet
 }
 
 var defaultConfig = Config{
@@ -145,11 +149,12 @@ var defaultConfig = Config{
 	Nats:    []NatsConfig{defaultNatsConfig},
 	Logging: defaultLoggingConfig,
 
-	Port:       8081,
-	Index:      0,
-	GoMaxProcs: -1,
-	EnableSSL:  false,
-	SSLPort:    443,
+	Port:        8081,
+	Index:       0,
+	GoMaxProcs:  -1,
+	EnablePROXY: false,
+	EnableSSL:   false,
+	SSLPort:     443,
 
 	EndpointTimeoutInSeconds:     60,
 	RouteServiceTimeoutInSeconds: 60,
@@ -163,7 +168,7 @@ var defaultConfig = Config{
 	TokenFetcherRetryIntervalInSeconds:        5,
 	TokenFetcherExpirationBufferTimeInSeconds: 30,
 
-	PreferredNetworkAsString:             	   "",
+	PreferredNetworkAsString: "",
 }
 
 func DefaultConfig() *Config {
@@ -200,6 +205,21 @@ func (c *Config) Process() {
 
 	if c.StartResponseDelayInterval > c.DropletStaleThreshold {
 		c.DropletStaleThreshold = c.StartResponseDelayInterval
+	}
+
+	// To avoid routes getting purged because of unresponsive NATS server
+	// we need to set the ping interval of nats client such that it fails over
+	// to next NATS server before dropletstalethreshold is hit
+	// That's why we set the ping interval to be
+	// dropletstalethresholdinseconds/2 - startresponsedelayintervalinseconds
+	// Since nats client waits for 2 ping outs we need to divide the stale threshold
+	// by 2 and then subtract the response delay interval, which is the interval at
+	// which route.register messages are published by apps
+	pingInterval := c.DropletStaleThresholdInSeconds / 2
+	if pingInterval > c.StartResponseDelayIntervalInSeconds {
+		c.NatsClientPingInterval = time.Duration(pingInterval-c.StartResponseDelayIntervalInSeconds) * time.Second
+	} else {
+		c.NatsClientPingInterval = time.Duration(pingInterval) * time.Second
 	}
 
 	c.DrainTimeout = c.EndpointTimeout
@@ -291,7 +311,7 @@ func (c *Config) RoutingApiEnabled() bool {
 
 func (c *Config) Initialize(configYAML []byte) error {
 	c.Nats = []NatsConfig{}
-	return candiedyaml.Unmarshal(configYAML, &c)
+	return yaml.Unmarshal(configYAML, &c)
 }
 
 func InitConfigFromFile(path string) *Config {

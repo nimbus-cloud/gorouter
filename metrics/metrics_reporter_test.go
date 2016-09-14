@@ -1,15 +1,16 @@
 package metrics_test
 
 import (
+	"code.cloudfoundry.org/gorouter/metrics"
+	"code.cloudfoundry.org/routing-api/models"
 	"github.com/cloudfoundry/dropsonde/metric_sender/fake"
 	dropsondeMetrics "github.com/cloudfoundry/dropsonde/metrics"
-	"github.com/cloudfoundry/gorouter/metrics"
 
 	"net/http"
 	"time"
 
+	"code.cloudfoundry.org/gorouter/route"
 	"github.com/cloudfoundry/dropsonde/metricbatcher"
-	"github.com/cloudfoundry/gorouter/route"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -23,7 +24,7 @@ var _ = Describe("MetricsReporter", func() {
 	BeforeEach(func() {
 		metricsReporter = metrics.NewMetricsReporter()
 		req, _ = http.NewRequest("GET", "https://example.com", nil)
-		endpoint = route.NewEndpoint("someId", "host", 2222, "privateId", map[string]string{}, 30, "")
+		endpoint = route.NewEndpoint("someId", "host", 2222, "privateId", "2", map[string]string{}, 30, "", models.ModificationTag{})
 		sender = fake.NewFakeMetricSender()
 		batcher := metricbatcher.New(sender, time.Millisecond)
 		dropsondeMetrics.Initialize(sender, batcher)

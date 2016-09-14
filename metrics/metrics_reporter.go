@@ -3,17 +3,14 @@ package metrics
 import (
 	"net/http"
 
+	"code.cloudfoundry.org/gorouter/metrics/reporter"
+	"code.cloudfoundry.org/gorouter/route"
 	dropsondeMetrics "github.com/cloudfoundry/dropsonde/metrics"
-	"github.com/cloudfoundry/gorouter/route"
 
 	"fmt"
 	"strings"
 	"time"
 )
-
-type ComponentTagged interface {
-	Component() string
-}
 
 type MetricsReporter struct {
 }
@@ -61,7 +58,7 @@ func (c *MetricsReporter) CaptureRouteStats(totalRoutes int, msSinceLastUpdate u
 	dropsondeMetrics.SendValue("ms_since_last_registry_update", float64(msSinceLastUpdate), "ms")
 }
 
-func (c *MetricsReporter) CaptureRegistryMessage(msg ComponentTagged) {
+func (c *MetricsReporter) CaptureRegistryMessage(msg reporter.ComponentTagged) {
 	dropsondeMetrics.IncrementCounter("registry_message." + msg.Component())
 }
 

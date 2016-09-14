@@ -1,30 +1,28 @@
 package main_test
 
 import (
-	"github.com/cloudfoundry/gorouter/access_log"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/varz"
-
-	"github.com/cloudfoundry/yagnats/fakeyagnats"
-	"github.com/pivotal-golang/lager/lagertest"
+	"code.cloudfoundry.org/gorouter/access_log"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/proxy"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/varz"
+	"code.cloudfoundry.org/lager/lagertest"
+	"code.cloudfoundry.org/routing-api/models"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
 	"strconv"
 
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
+	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
 )
 
 var _ = Describe("AccessLogRecord", func() {
 	Measure("Register", func(b Benchmarker) {
 		logger := lagertest.NewTestLogger("test")
 		c := config.DefaultConfig()
-		mbus := fakeyagnats.Connect()
-		r := registry.NewRouteRegistry(logger, c, mbus, new(fakes.FakeRouteRegistryReporter))
+		r := registry.NewRouteRegistry(logger, c, new(fakes.FakeRouteRegistryReporter))
 
 		accesslog, err := access_log.CreateRunningAccessLogger(logger, c)
 		Expect(err).ToNot(HaveOccurred())
@@ -43,7 +41,7 @@ var _ = Describe("AccessLogRecord", func() {
 				str := strconv.Itoa(i)
 				r.Register(
 					route.Uri("bench.vcap.me."+str),
-					route.NewEndpoint("", "localhost", uint16(i), "", nil, -1, ""),
+					route.NewEndpoint("", "localhost", uint16(i), "", "", nil, -1, "", models.ModificationTag{}),
 				)
 			}
 		})

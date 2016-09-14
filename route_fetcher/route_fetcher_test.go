@@ -5,21 +5,21 @@ import (
 	"os"
 	"time"
 
-	"github.com/pivotal-golang/clock/fakeclock"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
+	"code.cloudfoundry.org/clock/fakeclock"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
 
-	"github.com/cloudfoundry-incubator/routing-api"
-	"github.com/cloudfoundry-incubator/routing-api/db"
-	fake_routing_api "github.com/cloudfoundry-incubator/routing-api/fake_routing_api"
-	testUaaClient "github.com/cloudfoundry-incubator/uaa-go-client/fakes"
-	"github.com/cloudfoundry-incubator/uaa-go-client/schema"
+	"code.cloudfoundry.org/gorouter/config"
+	testRegistry "code.cloudfoundry.org/gorouter/registry/fakes"
+	"code.cloudfoundry.org/gorouter/route"
+	. "code.cloudfoundry.org/gorouter/route_fetcher"
+	"code.cloudfoundry.org/routing-api"
+	fake_routing_api "code.cloudfoundry.org/routing-api/fake_routing_api"
+	"code.cloudfoundry.org/routing-api/models"
+	testUaaClient "code.cloudfoundry.org/uaa-go-client/fakes"
+	"code.cloudfoundry.org/uaa-go-client/schema"
 	metrics_fakes "github.com/cloudfoundry/dropsonde/metric_sender/fake"
 	"github.com/cloudfoundry/dropsonde/metrics"
-	"github.com/cloudfoundry/gorouter/config"
-	testRegistry "github.com/cloudfoundry/gorouter/registry/fakes"
-	"github.com/cloudfoundry/gorouter/route"
-	. "github.com/cloudfoundry/gorouter/route_fetcher"
 	"github.com/tedsuo/ifrit"
 
 	. "github.com/onsi/ginkgo"
@@ -45,7 +45,7 @@ var _ = Describe("RouteFetcher", func() {
 
 		token *schema.Token
 
-		response     []db.Route
+		response     []models.Route
 		process      ifrit.Process
 		eventChannel chan routing_api.Event
 		errorChannel chan error
@@ -56,7 +56,7 @@ var _ = Describe("RouteFetcher", func() {
 	BeforeEach(func() {
 		logger = lagertest.NewTestLogger("test")
 		cfg = config.DefaultConfig()
-		cfg.PruneStaleDropletsInterval = 2 * time.Second
+		cfg.PruneStaleDropletsInterval = 2 * time.Millisecond
 
 		retryInterval := 0
 		uaaClient = &testUaaClient.FakeClient{}
@@ -99,19 +99,19 @@ var _ = Describe("RouteFetcher", func() {
 		BeforeEach(func() {
 			uaaClient.FetchTokenReturns(token, nil)
 
-			response = []db.Route{
+			response = []models.Route{
 				{
 					Route:   "foo",
 					Port:    1,
 					IP:      "1.1.1.1",
-					TTL:     1,
+					TTL:     new(int),
 					LogGuid: "guid",
 				},
 				{
 					Route:           "foo",
 					Port:            2,
 					IP:              "2.2.2.2",
-					TTL:             1,
+					TTL:             new(int),
 					LogGuid:         "guid",
 					RouteServiceUrl: "route-service-url",
 				},
@@ -119,11 +119,14 @@ var _ = Describe("RouteFetcher", func() {
 					Route:   "bar",
 					Port:    3,
 					IP:      "3.3.3.3",
-					TTL:     1,
+					TTL:     new(int),
 					LogGuid: "guid",
 				},
 			}
 
+			*response[0].TTL = 1
+			*response[1].TTL = 1
+			*response[2].TTL = 1
 		})
 
 		It("updates the route registry", func() {
@@ -142,9 +145,11 @@ var _ = Describe("RouteFetcher", func() {
 					route.NewEndpoint(expectedRoute.LogGuid,
 						expectedRoute.IP, uint16(expectedRoute.Port),
 						expectedRoute.LogGuid,
+						"",
 						nil,
-						expectedRoute.TTL,
+						*expectedRoute.TTL,
 						expectedRoute.RouteServiceUrl,
+						expectedRoute.ModificationTag,
 					)))
 			}
 		})
@@ -161,7 +166,7 @@ var _ = Describe("RouteFetcher", func() {
 		Context("when a cached token is invalid", func() {
 			BeforeEach(func() {
 				count := 0
-				client.RoutesStub = func() ([]db.Route, error) {
+				client.RoutesStub = func() ([]models.Route, error) {
 					if count == 0 {
 						count++
 						return nil, errors.New("unauthorized")
@@ -182,7 +187,7 @@ var _ = Describe("RouteFetcher", func() {
 		})
 
 		It("removes unregistered routes", func() {
-			secondResponse := []db.Route{
+			secondResponse := []models.Route{
 				response[0],
 			}
 
@@ -199,7 +204,7 @@ var _ = Describe("RouteFetcher", func() {
 			Expect(registry.RegisterCallCount()).To(Equal(4))
 			Expect(registry.UnregisterCallCount()).To(Equal(2))
 
-			expectedUnregisteredRoutes := []db.Route{
+			expectedUnregisteredRoutes := []models.Route{
 				response[1],
 				response[2],
 			}
@@ -213,9 +218,11 @@ var _ = Describe("RouteFetcher", func() {
 						expectedRoute.IP,
 						uint16(expectedRoute.Port),
 						expectedRoute.LogGuid,
+						"",
 						nil,
-						expectedRoute.TTL,
+						*expectedRoute.TTL,
 						expectedRoute.RouteServiceUrl,
+						expectedRoute.ModificationTag,
 					)))
 			}
 		})
@@ -264,6 +271,7 @@ var _ = Describe("RouteFetcher", func() {
 				}).Should(BeNumerically(">", currentTokenFetchErrors))
 			})
 		})
+
 	})
 
 	Describe("Run", func() {
@@ -273,6 +281,7 @@ var _ = Describe("RouteFetcher", func() {
 		})
 
 		JustBeforeEach(func() {
+			fetcher.FetchRoutesInterval = 10 * time.Millisecond
 			process = ifrit.Invoke(fetcher)
 		})
 
@@ -287,7 +296,7 @@ var _ = Describe("RouteFetcher", func() {
 
 		Context("on specified interval", func() {
 			It("it fetches routes", func() {
-				// to be consumed by by the eventSource.NextStub to avoid starvation
+				// to be consumed by the eventSource.NextStub to avoid starvation
 				eventChannel <- routing_api.Event{}
 				clock.Increment(cfg.PruneStaleDropletsInterval + 100*time.Millisecond)
 				Eventually(client.RoutesCallCount, 2*time.Second, 50*time.Millisecond).Should(Equal(1))
@@ -327,16 +336,11 @@ var _ = Describe("RouteFetcher", func() {
 			Context("and the event source successfully subscribes", func() {
 				It("responds to events", func() {
 					Eventually(client.SubscribeToEventsWithMaxRetriesCallCount).Should(Equal(1))
+					route := models.NewRoute("z.a.k", 63, "42.42.42.42", "Tomato", "route-service-url", 1)
 					eventChannel <- routing_api.Event{
 						Action: "Delete",
-						Route: db.Route{
-							Route:           "z.a.k",
-							Port:            63,
-							IP:              "42.42.42.42",
-							TTL:             1,
-							LogGuid:         "Tomato",
-							RouteServiceUrl: "route-service-url",
-						}}
+						Route:  route,
+					}
 					Eventually(registry.UnregisterCallCount).Should(BeNumerically(">=", 1))
 				})
 
@@ -412,14 +416,15 @@ var _ = Describe("RouteFetcher", func() {
 	Describe("HandleEvent", func() {
 		Context("When the event is an Upsert", func() {
 			It("registers the route from the registry", func() {
-				eventRoute := db.Route{
+				eventRoute := models.Route{
 					Route:           "z.a.k",
 					Port:            63,
 					IP:              "42.42.42.42",
-					TTL:             1,
+					TTL:             new(int),
 					LogGuid:         "Tomato",
 					RouteServiceUrl: "route-service-url",
 				}
+				*eventRoute.TTL = 1
 
 				event := routing_api.Event{
 					Action: "Upsert",
@@ -436,23 +441,26 @@ var _ = Describe("RouteFetcher", func() {
 						eventRoute.IP,
 						uint16(eventRoute.Port),
 						eventRoute.LogGuid,
+						"",
 						nil,
-						eventRoute.TTL,
+						*eventRoute.TTL,
 						eventRoute.RouteServiceUrl,
+						eventRoute.ModificationTag,
 					)))
 			})
 		})
 
 		Context("When the event is a DELETE", func() {
 			It("unregisters the route from the registry", func() {
-				eventRoute := db.Route{
+				eventRoute := models.Route{
 					Route:           "z.a.k",
 					Port:            63,
 					IP:              "42.42.42.42",
-					TTL:             1,
+					TTL:             new(int),
 					LogGuid:         "Tomato",
 					RouteServiceUrl: "route-service-url",
 				}
+				*eventRoute.TTL = 1
 
 				event := routing_api.Event{
 					Action: "Delete",
@@ -469,9 +477,11 @@ var _ = Describe("RouteFetcher", func() {
 						eventRoute.IP,
 						uint16(eventRoute.Port),
 						eventRoute.LogGuid,
+						"",
 						nil,
-						eventRoute.TTL,
+						*eventRoute.TTL,
 						eventRoute.RouteServiceUrl,
+						eventRoute.ModificationTag,
 					)))
 			})
 		})

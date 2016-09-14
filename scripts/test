@@ -14,13 +14,23 @@ trap printStatus EXIT
 
 . $(dirname $0)/gorequired
 
-#Download & Install gnatsd into GOPATH (or use pre-installed version)
-go get -v github.com/apcera/gnatsd
+# install gnatsd
+go get -v github.com/nats-io/gnatsd
 
-. $(dirname $0)/godep-env
-
-#Install ginkgo from Godeps into Godeps workspace
+# install ginkgo
 go install -v github.com/onsi/ginkgo/ginkgo
 
-#Run all tests
-ginkgo -r -failOnPending -keepGoing -randomizeAllSpecs -skipMeasurements=true -race "$@"
+echo -e "\n Formatting packages..."
+go fmt ./...
+
+ginkgo -r -failOnPending -randomizeAllSpecs -race "$@"
+
+# Installing dependencies needed by go vet
+go install .
+
+go tool vet -v -all -shadow=true main.go
+
+for file in $(find {access_log,common,config,metrics,proxy,registry,route,route_fetcher,route_service,router,stats,varz} \( -name "*.go" -not -iname "*test.go" \))
+do
+    go tool vet -v -all -shadow=true $file
+done

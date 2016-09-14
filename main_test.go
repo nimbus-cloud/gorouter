@@ -3,21 +3,22 @@ package main_test
 import (
 	"crypto/tls"
 	"errors"
+	"path"
 	"strconv"
 	"strings"
 
-	"github.com/cloudfoundry-incubator/candiedyaml"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/test"
-	"github.com/cloudfoundry/gorouter/test_util"
-	"github.com/cloudfoundry/gunk/natsrunner"
-	"github.com/cloudfoundry/yagnats"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/test"
+	"code.cloudfoundry.org/gorouter/test/common"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"code.cloudfoundry.org/localip"
+	"github.com/nats-io/nats"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gbytes"
 	. "github.com/onsi/gomega/gexec"
-	"github.com/pivotal-golang/localip"
+	"gopkg.in/yaml.v2"
 
 	"net"
 	"net/http/httptest"
@@ -34,52 +35,62 @@ import (
 	"time"
 )
 
+const defaultPruneInterval = 1
+const defaultPruneThreshold = 2
+
 var _ = Describe("Router Integration", func() {
 	var tmpdir string
 
 	var natsPort uint16
-	var natsRunner *natsrunner.NATSRunner
+	var natsRunner *test_util.NATSRunner
 
 	var gorouterSession *Session
 
 	writeConfig := func(config *config.Config, cfgFile string) {
-		cfgBytes, err := candiedyaml.Marshal(config)
+		cfgBytes, err := yaml.Marshal(config)
 		Expect(err).ToNot(HaveOccurred())
 		ioutil.WriteFile(cfgFile, cfgBytes, os.ModePerm)
 	}
 
-	configDrainSetup := func(cfg *config.Config) {
+	configDrainSetup := func(cfg *config.Config, pruneInterval, pruneThreshold, drainWait int) {
 		// ensure the threshold is longer than the interval that we check,
 		// because we set the route's timestamp to time.Now() on the interval
 		// as part of pausing
-		cfg.PruneStaleDropletsIntervalInSeconds = 1
-		cfg.DropletStaleThresholdInSeconds = 2
+		cfg.PruneStaleDropletsIntervalInSeconds = pruneInterval
+		cfg.DropletStaleThresholdInSeconds = pruneThreshold
 		cfg.StartResponseDelayIntervalInSeconds = 1
 		cfg.EndpointTimeoutInSeconds = 5
 		cfg.DrainTimeoutInSeconds = 1
+		cfg.DrainWaitInSeconds = drainWait
 	}
 
-	createConfig := func(cfgFile string, statusPort, proxyPort uint16) *config.Config {
-		cfg := test_util.SpecConfig(natsPort, statusPort, proxyPort)
+	createConfig := func(cfgFile string, statusPort, proxyPort uint16, pruneInterval, pruneThreshold, drainWait int, suspendPruning bool, natsPorts ...uint16) *config.Config {
+		cfg := test_util.SpecConfig(statusPort, proxyPort, natsPorts...)
 
-		configDrainSetup(cfg)
+		configDrainSetup(cfg, pruneInterval, pruneThreshold, drainWait)
+
+		cfg.SuspendPruningIfNatsUnavailable = suspendPruning
+		caCertsPath := filepath.Join("test", "assets", "certs", "uaa-ca.pem")
+		caCertsPath, err := filepath.Abs(caCertsPath)
+		Expect(err).ToNot(HaveOccurred())
 
 		cfg.OAuth = config.OAuthConfig{
-			TokenEndpoint:            "non-existent-oauth.com",
-			Port:                     8443,
-			ClientName:               "client-id",
-			ClientSecret:             "client-secret",
-			SkipOAuthTLSVerification: true,
+			TokenEndpoint:     "127.0.0.1",
+			Port:              8443,
+			ClientName:        "client-id",
+			ClientSecret:      "client-secret",
+			SkipSSLValidation: false,
+			CACerts:           caCertsPath,
 		}
 
 		writeConfig(cfg, cfgFile)
 		return cfg
 	}
 
-	createSSLConfig := func(cfgFile string, statusPort, proxyPort, SSLPort uint16) *config.Config {
-		config := test_util.SpecSSLConfig(natsPort, statusPort, proxyPort, SSLPort)
+	createSSLConfig := func(cfgFile string, statusPort, proxyPort, SSLPort uint16, natsPorts ...uint16) *config.Config {
+		config := test_util.SpecSSLConfig(statusPort, proxyPort, SSLPort, natsPorts...)
 
-		configDrainSetup(config)
+		configDrainSetup(config, defaultPruneInterval, defaultPruneThreshold, 0)
 
 		writeConfig(config, cfgFile)
 		return config
@@ -89,7 +100,8 @@ var _ = Describe("Router Integration", func() {
 		gorouterCmd := exec.Command(gorouterPath, "-c", cfgFile)
 		session, err := Start(gorouterCmd, GinkgoWriter, GinkgoWriter)
 		Expect(err).ToNot(HaveOccurred())
-		Eventually(session, 5).Should(Say("gorouter.started"))
+		Eventually(session, 30).Should(Say("starting"))
+		Eventually(session, 15).Should(Say("gorouter.started"))
 		gorouterSession = session
 		return session
 	}
@@ -106,7 +118,7 @@ var _ = Describe("Router Integration", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		natsPort = test_util.NextAvailPort()
-		natsRunner = natsrunner.NewNATSRunner(int(natsPort))
+		natsRunner = test_util.NewNATSRunner(int(natsPort))
 		natsRunner.Start()
 	})
 
@@ -138,7 +150,7 @@ var _ = Describe("Router Integration", func() {
 			proxyPort = test_util.NextAvailPort()
 
 			cfgFile = filepath.Join(tmpdir, "config.yml")
-			config = createConfig(cfgFile, statusPort, proxyPort)
+			config = createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 1, false, natsPort)
 		})
 
 		JustBeforeEach(func() {
@@ -153,13 +165,13 @@ var _ = Describe("Router Integration", func() {
 			requestProcessing := make(chan bool)
 			responseRead := make(chan bool)
 
-			longApp := test.NewTestApp([]route.Uri{"longapp.vcap.me"}, proxyPort, mbusClient, nil, "")
+			longApp := common.NewTestApp([]route.Uri{"longapp.vcap.me"}, proxyPort, mbusClient, nil, "")
 			longApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				requestMade <- true
 				<-requestProcessing
-				_, err := ioutil.ReadAll(r.Body)
+				_, ioErr := ioutil.ReadAll(r.Body)
 				defer r.Body.Close()
-				Expect(err).ToNot(HaveOccurred())
+				Expect(ioErr).ToNot(HaveOccurred())
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte{'b'})
 			})
@@ -174,21 +186,21 @@ var _ = Describe("Router Integration", func() {
 				defer GinkgoRecover()
 				//Open a connection that never goes active
 				Eventually(func() bool {
-					conn, err := net.DialTimeout("tcp",
+					conn, dialErr := net.DialTimeout("tcp",
 						fmt.Sprintf("%s:%d", localIP, proxyPort), 30*time.Second)
-					if err == nil {
+					if dialErr == nil {
 						return conn.Close() == nil
 					}
 					return false
 				}).Should(BeTrue())
 
 				//Open a connection that goes active
-				resp, err := http.Get(longApp.Endpoint())
-				Expect(err).ShouldNot(HaveOccurred())
+				resp, httpErr := http.Get(longApp.Endpoint())
+				Expect(httpErr).ShouldNot(HaveOccurred())
 				Expect(resp.StatusCode).Should(Equal(http.StatusOK))
-				bytes, err := ioutil.ReadAll(resp.Body)
+				bytes, httpErr := ioutil.ReadAll(resp.Body)
 				resp.Body.Close()
-				Expect(err).ShouldNot(HaveOccurred())
+				Expect(httpErr).ShouldNot(HaveOccurred())
 				Expect(bytes).Should(Equal([]byte{'b'}))
 				responseRead <- true
 			}()
@@ -214,7 +226,7 @@ var _ = Describe("Router Integration", func() {
 
 			blocker := make(chan bool)
 			resultCh := make(chan error, 1)
-			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
+			timeoutApp := common.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
 			timeoutApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				blocker <- true
 				<-blocker
@@ -225,8 +237,8 @@ var _ = Describe("Router Integration", func() {
 
 			go func() {
 				defer GinkgoRecover()
-				_, err := http.Get(timeoutApp.Endpoint())
-				resultCh <- err
+				_, httpErr := http.Get(timeoutApp.Endpoint())
+				resultCh <- httpErr
 			}()
 
 			<-blocker
@@ -249,7 +261,7 @@ var _ = Describe("Router Integration", func() {
 			mbusClient, err := newMessageBus(config)
 
 			blocker := make(chan bool)
-			timeoutApp := test.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
+			timeoutApp := common.NewTestApp([]route.Uri{"timeout.vcap.me"}, proxyPort, mbusClient, nil, "")
 			timeoutApp.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				blocker <- true
 				<-blocker
@@ -282,7 +294,7 @@ var _ = Describe("Router Integration", func() {
 
 		Context("when ssl is enabled", func() {
 			BeforeEach(func() {
-				createSSLConfig(cfgFile, statusPort, proxyPort, test_util.NextAvailPort())
+				createSSLConfig(cfgFile, statusPort, proxyPort, test_util.NextAvailPort(), defaultPruneInterval, defaultPruneThreshold, natsPort)
 			})
 
 			It("drains properly", func() {
@@ -293,6 +305,25 @@ var _ = Describe("Router Integration", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Eventually(grouter, 5).Should(Exit(0))
 			})
+
+		})
+
+		Context("when multiple signals are received", func() {
+			It("drains properly", func() {
+				grouter := gorouterSession
+				gorouterSession = nil
+				err := grouter.Command.Process.Signal(syscall.SIGUSR1)
+				Expect(err).ToNot(HaveOccurred())
+
+				// send more signals to ensure gorouter still drains gracefully
+				go func() {
+					for i := 0; i < 10; i++ {
+						grouter.Command.Process.Signal(syscall.SIGUSR1)
+						time.Sleep(5 * time.Millisecond)
+					}
+				}()
+				Eventually(grouter).Should(Say("gorouter.stopped"))
+			})
 		})
 	})
 
@@ -302,7 +333,7 @@ var _ = Describe("Router Integration", func() {
 			proxyPort := test_util.NextAvailPort()
 
 			cfgFile := filepath.Join(tmpdir, "config.yml")
-			config := createConfig(cfgFile, statusPort, proxyPort)
+			config := createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 			config.Logging.MetronAddress = ""
 			writeConfig(config, cfgFile)
 
@@ -316,7 +347,7 @@ var _ = Describe("Router Integration", func() {
 		statusPort := test_util.NextAvailPort()
 		proxyPort := test_util.NextAvailPort()
 		cfgFile := filepath.Join(tmpdir, "config.yml")
-		createConfig(cfgFile, statusPort, proxyPort)
+		createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 
 		gorouterSession = startGorouterSession(cfgFile)
 
@@ -331,7 +362,7 @@ var _ = Describe("Router Integration", func() {
 		proxyPort := test_util.NextAvailPort()
 
 		cfgFile := filepath.Join(tmpdir, "config.yml")
-		config := createConfig(cfgFile, statusPort, proxyPort)
+		config := createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 
 		gorouterSession = startGorouterSession(cfgFile)
 
@@ -390,13 +421,153 @@ var _ = Describe("Router Integration", func() {
 		runningApp.VerifyAppStatus(200)
 	})
 
+	Context("multiple nats server", func() {
+		var (
+			config         *config.Config
+			cfgFile        string
+			natsPort2      uint16
+			proxyPort      uint16
+			statusPort     uint16
+			natsRunner2    *test_util.NATSRunner
+			pruneInterval  int
+			pruneThreshold int
+		)
+
+		BeforeEach(func() {
+			natsPort2 = test_util.NextAvailPort()
+			natsRunner2 = test_util.NewNATSRunner(int(natsPort2))
+
+			statusPort = test_util.NextAvailPort()
+			proxyPort = test_util.NextAvailPort()
+
+			cfgFile = filepath.Join(tmpdir, "config.yml")
+			pruneInterval = 2
+			pruneThreshold = 10
+			config = createConfig(cfgFile, statusPort, proxyPort, pruneInterval, pruneThreshold, 0, false, natsPort, natsPort2)
+		})
+
+		AfterEach(func() {
+			natsRunner2.Stop()
+		})
+
+		JustBeforeEach(func() {
+			gorouterSession = startGorouterSession(cfgFile)
+		})
+
+		It("fails over to second nats server before pruning", func() {
+			localIP, err := localip.LocalIP()
+			Expect(err).ToNot(HaveOccurred())
+
+			mbusClient, err := newMessageBus(config)
+
+			runningApp := test.NewGreetApp([]route.Uri{"demo.vcap.me"}, proxyPort, mbusClient, nil)
+			runningApp.Listen()
+
+			routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
+
+			Eventually(func() bool { return appRegistered(routesUri, runningApp) }).Should(BeTrue())
+
+			heartbeatInterval := 200 * time.Millisecond
+			runningTicker := time.NewTicker(heartbeatInterval)
+
+			go func() {
+				for {
+					select {
+					case <-runningTicker.C:
+						runningApp.Register()
+					}
+				}
+			}()
+
+			runningApp.VerifyAppStatus(200)
+
+			// Give enough time to register multiple times
+			time.Sleep(heartbeatInterval * 3)
+
+			natsRunner.Stop()
+			natsRunner2.Start()
+
+			staleCheckInterval := config.PruneStaleDropletsIntervalInSeconds
+			staleThreshold := config.DropletStaleThresholdInSeconds
+			// Give router time to make a bad decision (i.e. prune routes)
+			sleepTime := time.Duration((2*staleCheckInterval)+(2*staleThreshold)) * time.Second
+			time.Sleep(sleepTime)
+
+			// Expect not to have pruned the routes as it fails over to next NAT server
+			runningApp.VerifyAppStatus(200)
+
+			natsRunner.Start()
+
+		})
+
+		Context("when suspend_pruning_if_nats_unavailable enabled", func() {
+
+			BeforeEach(func() {
+				natsPort2 = test_util.NextAvailPort()
+				natsRunner2 = test_util.NewNATSRunner(int(natsPort2))
+
+				statusPort = test_util.NextAvailPort()
+				proxyPort = test_util.NextAvailPort()
+
+				cfgFile = filepath.Join(tmpdir, "config.yml")
+				pruneInterval = 2
+				pruneThreshold = 10
+				suspendPruningIfNatsUnavailable := true
+				config = createConfig(cfgFile, statusPort, proxyPort, pruneInterval, pruneThreshold, 0, suspendPruningIfNatsUnavailable, natsPort, natsPort2)
+			})
+
+			It("does not prune routes when nats is unavailable", func() {
+				localIP, err := localip.LocalIP()
+				Expect(err).ToNot(HaveOccurred())
+
+				mbusClient, err := newMessageBus(config)
+
+				runningApp := test.NewGreetApp([]route.Uri{"demo.vcap.me"}, proxyPort, mbusClient, nil)
+				runningApp.Listen()
+
+				routesUri := fmt.Sprintf("http://%s:%s@%s:%d/routes", config.Status.User, config.Status.Pass, localIP, statusPort)
+
+				Eventually(func() bool { return appRegistered(routesUri, runningApp) }).Should(BeTrue())
+
+				heartbeatInterval := 200 * time.Millisecond
+				runningTicker := time.NewTicker(heartbeatInterval)
+
+				go func() {
+					for {
+						select {
+						case <-runningTicker.C:
+							runningApp.Register()
+						}
+					}
+				}()
+
+				runningApp.VerifyAppStatus(200)
+
+				// Give enough time to register multiple times
+				time.Sleep(heartbeatInterval * 3)
+
+				natsRunner.Stop()
+
+				staleCheckInterval := config.PruneStaleDropletsIntervalInSeconds
+				staleThreshold := config.DropletStaleThresholdInSeconds
+
+				// Give router time to make a bad decision (i.e. prune routes)
+				sleepTime := time.Duration((2*staleCheckInterval)+(2*staleThreshold)) * time.Second
+				time.Sleep(sleepTime)
+
+				// Expect not to have pruned the routes after nats goes away
+				runningApp.VerifyAppStatus(200)
+			})
+		})
+	})
+
 	Context("when the route_services_secret and the route_services_secret_decrypt_only are valid", func() {
 		It("starts fine", func() {
 			statusPort := test_util.NextAvailPort()
 			proxyPort := test_util.NextAvailPort()
 
 			cfgFile := filepath.Join(tmpdir, "config.yml")
-			config := createConfig(cfgFile, statusPort, proxyPort)
+			config := createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 			config.RouteServiceSecret = "route-service-secret"
 			config.RouteServiceSecretPrev = "my-previous-route-service-secret"
 			writeConfig(config, cfgFile)
@@ -414,7 +585,7 @@ var _ = Describe("Router Integration", func() {
 				proxyPort := test_util.NextAvailPort()
 
 				cfgFile := filepath.Join(tmpdir, "config.yml")
-				cfg := createConfig(cfgFile, statusPort, proxyPort)
+				cfg := createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 				cfg.OAuth = config.OAuthConfig{}
 				writeConfig(cfg, cfgFile)
 
@@ -437,7 +608,7 @@ var _ = Describe("Router Integration", func() {
 
 			cfgFile = filepath.Join(tmpdir, "config.yml")
 
-			cfg = createConfig(cfgFile, statusPort, proxyPort)
+			cfg = createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 			writeConfig(cfg, cfgFile)
 		})
 
@@ -462,7 +633,7 @@ var _ = Describe("Router Integration", func() {
 			proxyPort := test_util.NextAvailPort()
 
 			cfgFile = filepath.Join(tmpdir, "config.yml")
-			config = createConfig(cfgFile, statusPort, proxyPort)
+			config = createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 
 			routingApi = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				jsonBytes := []byte(`[{"route":"foo.com","port":65340,"ip":"1.2.3.4","ttl":60,"log_guid":"foo-guid"}]`)
@@ -553,7 +724,7 @@ var _ = Describe("Router Integration", func() {
 			proxyPort := test_util.NextAvailPort()
 
 			cfgFile = filepath.Join(tmpdir, "config.yml")
-			config := createConfig(cfgFile, statusPort, proxyPort)
+			config := createConfig(cfgFile, statusPort, proxyPort, defaultPruneInterval, defaultPruneThreshold, 0, false, natsPort)
 			config.Logging.File = "nonExistentDir/file"
 			writeConfig(config, cfgFile)
 		})
@@ -581,8 +752,9 @@ func hostnameAndPort(url string) (string, int) {
 	port, _ := strconv.Atoi(parts[1])
 	return hostname, port
 }
-func newMessageBus(c *config.Config) (yagnats.NATSConn, error) {
+func newMessageBus(c *config.Config) (*nats.Conn, error) {
 	natsMembers := make([]string, len(c.Nats))
+	options := nats.DefaultOptions
 	for _, info := range c.Nats {
 		uri := url.URL{
 			Scheme: "nats",
@@ -591,16 +763,16 @@ func newMessageBus(c *config.Config) (yagnats.NATSConn, error) {
 		}
 		natsMembers = append(natsMembers, uri.String())
 	}
-
-	return yagnats.Connect(natsMembers)
+	options.Servers = natsMembers
+	return options.Connect()
 }
 
-func appRegistered(routesUri string, app *test.TestApp) bool {
+func appRegistered(routesUri string, app *common.TestApp) bool {
 	routeFound, err := routeExists(routesUri, string(app.Urls()[0]))
 	return err == nil && routeFound
 }
 
-func appUnregistered(routesUri string, app *test.TestApp) bool {
+func appUnregistered(routesUri string, app *common.TestApp) bool {
 	routeFound, err := routeExists(routesUri, string(app.Urls()[0]))
 	return err == nil && !routeFound
 }
@@ -646,8 +818,12 @@ func setupTlsServer() net.Listener {
 }
 
 func newTlsListener(listener net.Listener) net.Listener {
-	public := "test/assets/public.pem"
-	private := "test/assets/private.pem"
+	caCertsPath := path.Join("test", "assets", "certs")
+	caCertsPath, err := filepath.Abs(caCertsPath)
+	Expect(err).ToNot(HaveOccurred())
+
+	public := filepath.Join(caCertsPath, "server.pem")
+	private := filepath.Join(caCertsPath, "server.key")
 	cert, err := tls.LoadX509KeyPair(public, private)
 	Expect(err).ToNot(HaveOccurred())
 

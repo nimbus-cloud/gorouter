@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"crypto/tls"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -12,29 +11,28 @@ import (
 	"sync/atomic"
 	"time"
 
+	"code.cloudfoundry.org/gorouter/access_log"
+	"code.cloudfoundry.org/gorouter/access_log/schema"
+	router_http "code.cloudfoundry.org/gorouter/common/http"
+	"code.cloudfoundry.org/gorouter/common/secure"
+	"code.cloudfoundry.org/gorouter/metrics/reporter"
+	"code.cloudfoundry.org/gorouter/proxy/handler"
+	"code.cloudfoundry.org/gorouter/proxy/round_tripper"
+	"code.cloudfoundry.org/gorouter/proxy/utils"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/route_service"
+	"code.cloudfoundry.org/lager"
 	"github.com/cloudfoundry/dropsonde"
-	"github.com/cloudfoundry/gorouter/access_log"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/common/secure"
-	"github.com/cloudfoundry/gorouter/metrics"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/route_service"
-	"github.com/pivotal-golang/lager"
 )
 
 const (
 	VcapCookieId    = "__VCAP_ID__"
 	StickyCookieKey = "JSESSIONID"
-	maxRetries      = 3
 )
-
-var noEndpointsAvailable = errors.New("No endpoints available")
 
 type LookupRegistry interface {
 	Lookup(uri route.Uri) *route.Pool
 }
-
-type AfterRoundTrip func(rsp *http.Response, endpoint *route.Endpoint, err error)
 
 type Proxy interface {
 	ServeHTTP(responseWriter http.ResponseWriter, request *http.Request)
@@ -47,7 +45,7 @@ type ProxyArgs struct {
 	Ip                         string
 	TraceKey                   string
 	Registry                   LookupRegistry
-	Reporter                   metrics.ProxyReporter
+	Reporter                   reporter.ProxyReporter
 	AccessLogger               access_log.AccessLogger
 	SecureCookies              bool
 	TLSConfig                  *tls.Config
@@ -65,7 +63,7 @@ type proxy struct {
 	traceKey                   string
 	logger                     lager.Logger
 	registry                   LookupRegistry
-	reporter                   metrics.ProxyReporter
+	reporter                   reporter.ProxyReporter
 	accessLogger               access_log.AccessLogger
 	transport                  *http.Transport
 	secureCookies              bool
@@ -146,7 +144,7 @@ func (p *proxy) Drain() {
 
 func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
 	startedAt := time.Now()
-	accessLog := access_log.AccessLogRecord{
+	accessLog := schema.AccessLogRecord{
 		Request:           request,
 		StartedAt:         startedAt,
 		ExtraHeadersToLog: p.extraHeadersToLog,
@@ -155,8 +153,8 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 	requestBodyCounter := &countingReadCloser{delegate: request.Body}
 	request.Body = requestBodyCounter
 
-	proxyWriter := NewProxyResponseWriter(responseWriter)
-	handler := NewRequestHandler(request, proxyWriter, p.reporter, &accessLog, p.logger)
+	proxyWriter := utils.NewProxyResponseWriter(responseWriter)
+	handler := handler.NewRequestHandler(request, proxyWriter, p.reporter, &accessLog, p.logger)
 
 	defer func() {
 		accessLog.RequestBytesReceived = requestBodyCounter.GetCount()
@@ -226,7 +224,7 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 			recommendedScheme = "http"
 		}
 
-		forwardedUrlRaw := recommendedScheme + "://" + request.Host + request.RequestURI
+		forwardedUrlRaw := recommendedScheme + "://" + hostWithoutPort(request) + request.RequestURI
 		if hasBeenToRouteService(routeServiceUrl, rsSignature) {
 			// A request from a route service destined for a backend instances
 			routeServiceArgs.UrlString = routeServiceUrl
@@ -263,7 +261,7 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 
 		if err != nil {
 			p.reporter.CaptureBadGateway(request)
-			handler.HandleBadGateway(err)
+			handler.HandleBadGateway(err, request)
 			return
 		}
 
@@ -278,7 +276,7 @@ func (p *proxy) ServeHTTP(responseWriter http.ResponseWriter, request *http.Requ
 
 	}
 
-	roundTripper := NewProxyRoundTripper(backend,
+	roundTripper := round_tripper.NewProxyRoundTripper(backend,
 		dropsonde.InstrumentedRoundTripper(p.transport), iter, handler, after)
 
 	newReverseProxy(roundTripper, request, routeServiceArgs, p.routeServiceConfig).ServeHTTP(proxyWriter, request)
@@ -317,7 +315,7 @@ func SetupProxyRequest(source *http.Request, target *http.Request,
 	target.URL.Opaque = source.RequestURI
 	target.URL.RawQuery = ""
 
-	setRequestXRequestStart(source)
+	handler.SetRequestXRequestStart(source)
 
 	sig := target.Header.Get(route_service.RouteServiceSignature)
 	if forwardingToRouteService(routeServiceArgs.UrlString, sig) {
@@ -328,12 +326,6 @@ func SetupProxyRequest(source *http.Request, target *http.Request,
 		target.Header.Del(route_service.RouteServiceSignature)
 		target.Header.Del(route_service.RouteServiceMetadata)
 		target.Header.Del(route_service.RouteServiceForwardedUrl)
-	}
-}
-
-func newRouteServiceEndpoint() *route.Endpoint {
-	return &route.Endpoint{
-		Tags: map[string]string{},
 	}
 }
 
@@ -443,15 +435,15 @@ func isTcpUpgrade(request *http.Request) bool {
 }
 
 func upgradeHeader(request *http.Request) string {
-    // handle multiple Connection field-values, either in a comma-separated string or multiple field-headers
-    for _, v := range request.Header[http.CanonicalHeaderKey("Connection")] {
-        // upgrade should be case insensitive per RFC6455 4.2.1
-        if strings.Contains(strings.ToLower(v), "upgrade") {
-            return request.Header.Get("Upgrade")
-        }
-    }
+	// handle multiple Connection field-values, either in a comma-separated string or multiple field-headers
+	for _, v := range request.Header[http.CanonicalHeaderKey("Connection")] {
+		// upgrade should be case insensitive per RFC6455 4.2.1
+		if strings.Contains(strings.ToLower(v), "upgrade") {
+			return request.Header.Get("Upgrade")
+		}
+	}
 
-    return ""
+	return ""
 }
 
 func setTraceHeaders(responseWriter http.ResponseWriter, routerIp, addr string) {

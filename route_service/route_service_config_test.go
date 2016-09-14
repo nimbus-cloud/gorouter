@@ -5,13 +5,14 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/common/secure"
-	"github.com/cloudfoundry/gorouter/route_service"
-	"github.com/cloudfoundry/gorouter/test_util"
+	"code.cloudfoundry.org/gorouter/common/secure"
+	"code.cloudfoundry.org/gorouter/route_service"
+	"code.cloudfoundry.org/gorouter/route_service/header"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
 )
 
 var _ = Describe("Route Service Config", func() {
@@ -92,7 +93,7 @@ var _ = Describe("Route Service Config", func() {
 			metadataHeader  string
 			requestUrl      string
 			headers         *http.Header
-			signature       *route_service.Signature
+			signature       *header.Signature
 		)
 
 		BeforeEach(func() {
@@ -100,11 +101,11 @@ var _ = Describe("Route Service Config", func() {
 			headers = &h
 			var err error
 			requestUrl = "some-forwarded-url"
-			signature = &route_service.Signature{
+			signature = &header.Signature{
 				RequestedTime: time.Now(),
 				ForwardedUrl:  requestUrl,
 			}
-			signatureHeader, metadataHeader, err = route_service.BuildSignatureAndMetadata(crypto, signature)
+			signatureHeader, metadataHeader, err = header.BuildSignatureAndMetadata(crypto, signature)
 			Expect(err).ToNot(HaveOccurred())
 
 			headers.Set(route_service.RouteServiceForwardedUrl, "some-forwarded-url")
@@ -122,12 +123,12 @@ var _ = Describe("Route Service Config", func() {
 
 		Context("when the timestamp is expired", func() {
 			BeforeEach(func() {
-				signature = &route_service.Signature{
+				signature = &header.Signature{
 					RequestedTime: time.Now().Add(-10 * time.Hour),
 					ForwardedUrl:  "some-forwarded-url",
 				}
 				var err error
-				signatureHeader, metadataHeader, err = route_service.BuildSignatureAndMetadata(crypto, signature)
+				signatureHeader, metadataHeader, err = header.BuildSignatureAndMetadata(crypto, signature)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -193,12 +194,12 @@ var _ = Describe("Route Service Config", func() {
 
 				Context("when a request has an expired Route service signature header", func() {
 					BeforeEach(func() {
-						signature = &route_service.Signature{
+						signature = &header.Signature{
 							RequestedTime: time.Now().Add(-10 * time.Hour),
 							ForwardedUrl:  "some-forwarded-url",
 						}
 						var err error
-						signatureHeader, metadataHeader, err = route_service.BuildSignatureAndMetadata(crypto, signature)
+						signatureHeader, metadataHeader, err = header.BuildSignatureAndMetadata(crypto, signature)
 						Expect(err).ToNot(HaveOccurred())
 					})
 

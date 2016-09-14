@@ -3,22 +3,22 @@ package router_test
 import (
 	"os"
 
-	"github.com/apcera/nats"
+	"code.cloudfoundry.org/gorouter/access_log"
+	"code.cloudfoundry.org/gorouter/common"
+	"code.cloudfoundry.org/gorouter/common/health"
+	router_http "code.cloudfoundry.org/gorouter/common/http"
+	"code.cloudfoundry.org/gorouter/common/schema"
+	cfg "code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/proxy"
+	rregistry "code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	. "code.cloudfoundry.org/gorouter/router"
+	"code.cloudfoundry.org/gorouter/test"
+	"code.cloudfoundry.org/gorouter/test_util"
+	vvarz "code.cloudfoundry.org/gorouter/varz"
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/dropsonde/emitter/fake"
-	"github.com/cloudfoundry/gorouter/access_log"
-	vcap "github.com/cloudfoundry/gorouter/common"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	cfg "github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	rregistry "github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	. "github.com/cloudfoundry/gorouter/router"
-	"github.com/cloudfoundry/gorouter/test"
-	"github.com/cloudfoundry/gorouter/test_util"
-	vvarz "github.com/cloudfoundry/gorouter/varz"
-	"github.com/cloudfoundry/gunk/natsrunner"
-	"github.com/cloudfoundry/yagnats"
+	"github.com/nats-io/nats"
 	. "github.com/onsi/ginkgo"
 	gConfig "github.com/onsi/ginkgo/config"
 	. "github.com/onsi/gomega"
@@ -33,12 +33,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"strings"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
+	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
+	testcommon "code.cloudfoundry.org/gorouter/test/common"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
 )
 
 var _ = Describe("Router", func() {
@@ -46,11 +46,11 @@ var _ = Describe("Router", func() {
 	const uuid_regex = `^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$`
 
 	var (
-		natsRunner *natsrunner.NATSRunner
+		natsRunner *test_util.NATSRunner
 		natsPort   uint16
 		config     *cfg.Config
 
-		mbusClient   yagnats.NATSConn
+		mbusClient   *nats.Conn
 		registry     *rregistry.RouteRegistry
 		varz         vvarz.Varz
 		router       *Router
@@ -62,7 +62,7 @@ var _ = Describe("Router", func() {
 
 	BeforeEach(func() {
 		natsPort = test_util.NextAvailPort()
-		natsRunner = natsrunner.NewNATSRunner(int(natsPort))
+		natsRunner = test_util.NewNATSRunner(int(natsPort))
 		natsRunner.Start()
 
 		fakeEmitter := fake.NewFakeEventEmitter("fake")
@@ -71,14 +71,15 @@ var _ = Describe("Router", func() {
 		proxyPort := test_util.NextAvailPort()
 		statusPort := test_util.NextAvailPort()
 
-		cert, err := tls.LoadX509KeyPair("../test/assets/public.pem", "../test/assets/private.pem")
+		cert, err := tls.LoadX509KeyPair("../test/assets/certs/server.pem", "../test/assets/certs/server.key")
 		Expect(err).ToNot(HaveOccurred())
 
-		config = test_util.SpecConfig(natsPort, statusPort, proxyPort)
+		config = test_util.SpecConfig(statusPort, proxyPort, natsPort)
 		config.EnableSSL = true
 		config.SSLPort = 4443 + uint16(gConfig.GinkgoConfig.ParallelNode)
 		config.SSLCertificate = cert
 		config.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_256_CBC_SHA}
+		config.EnablePROXY = true
 
 		// set pid file
 		f, err := ioutil.TempFile("", "gorouter-test-pidfile-")
@@ -87,9 +88,9 @@ var _ = Describe("Router", func() {
 
 		mbusClient = natsRunner.MessageBus
 		logger = lagertest.NewTestLogger("router-test")
-		registry = rregistry.NewRouteRegistry(logger, config, mbusClient, new(fakes.FakeRouteRegistryReporter))
+		registry = rregistry.NewRouteRegistry(logger, config, new(fakes.FakeRouteRegistryReporter))
 		varz = vvarz.NewVarz(registry)
-		logcounter := vcap.NewLogCounter()
+		logcounter := schema.NewLogCounter()
 		proxy := proxy.NewProxy(proxy.ProxyArgs{
 			EndpointTimeout: config.EndpointTimeout,
 			Logger:          logger,
@@ -115,7 +116,6 @@ var _ = Describe("Router", func() {
 		}
 
 	})
-
 
 	AfterEach(func() {
 		if natsRunner != nil {
@@ -148,7 +148,7 @@ var _ = Describe("Router", func() {
 				var msg []byte
 				Eventually(response).Should(Receive(&msg))
 
-				var message vcap.RouterStart
+				var message common.RouterStart
 				err := json.Unmarshal(msg, &message)
 
 				Expect(err).NotTo(HaveOccurred())
@@ -168,14 +168,14 @@ var _ = Describe("Router", func() {
 
 		It("discovers", func() {
 			// Test if router responses to discover message
-			sig := make(chan vcap.Varz)
+			sig := make(chan health.Varz)
 
 			// Since the form of uptime is xxd:xxh:xxm:xxs, we should make
 			// sure that router has run at least for one second
 			time.Sleep(time.Second)
 
 			mbusClient.Subscribe("vcap.component.discover.test.response", func(msg *nats.Msg) {
-				var varz vcap.Varz
+				var varz health.Varz
 				_ = json.Unmarshal(msg.Data, &varz)
 				sig <- varz
 			})
@@ -186,11 +186,11 @@ var _ = Describe("Router", func() {
 				[]byte{},
 			)
 
-			var varz vcap.Varz
+			var varz health.Varz
 			Eventually(sig).Should(Receive(&varz))
 
 			var emptyTime time.Time
-			var emptyDuration vcap.Duration
+			var emptyDuration schema.Duration
 
 			Expect(varz.Type).To(Equal("Router"))
 			Expect(varz.Index).To(Equal(uint(2)))
@@ -203,7 +203,7 @@ var _ = Describe("Router", func() {
 		})
 
 		Context("Register and Unregister", func() {
-			var app *test.TestApp
+			var app *testcommon.TestApp
 
 			assertRegisterUnregister := func() {
 				app.Listen()
@@ -259,9 +259,16 @@ var _ = Describe("Router", func() {
 			started <- true
 		})
 
-		mbusClient.AddReconnectedCB(func(_ *nats.Conn) {
+		reconnectedCbs := make([]func(*nats.Conn), 0)
+		reconnectedCbs = append(reconnectedCbs, mbusClient.Opts.ReconnectedCB)
+		reconnectedCbs = append(reconnectedCbs, func(_ *nats.Conn) {
 			cb <- true
 		})
+		mbusClient.Opts.ReconnectedCB = func(conn *nats.Conn) {
+			for _, rcb := range reconnectedCbs {
+				rcb(conn)
+			}
+		}
 
 		natsRunner.Stop()
 		natsRunner.Start()
@@ -333,7 +340,7 @@ var _ = Describe("Router", func() {
 	})
 
 	It("sticky session", func() {
-		apps := make([]*test.TestApp, 10)
+		apps := make([]*testcommon.TestApp, 10)
 		for i := range apps {
 			apps[i] = test.NewStickyApp([]route.Uri{"sticky.vcap.me"}, config.Port, mbusClient, nil)
 			apps[i].Listen()
@@ -357,7 +364,7 @@ var _ = Describe("Router", func() {
 
 	Context("Stop", func() {
 		It("no longer proxies http", func() {
-			app := test.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
+			app := testcommon.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
 
 			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				_, err := ioutil.ReadAll(r.Body)
@@ -407,7 +414,7 @@ var _ = Describe("Router", func() {
 		})
 
 		It("no longer proxies https", func() {
-			app := test.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
+			app := testcommon.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
 
 			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 				_, err := ioutil.ReadAll(r.Body)
@@ -446,7 +453,7 @@ var _ = Describe("Router", func() {
 	})
 
 	It("handles a PUT request", func() {
-		app := test.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
+		app := testcommon.NewTestApp([]route.Uri{"greet.vcap.me"}, config.Port, mbusClient, nil, "")
 
 		var rr *http.Request
 		var msg string
@@ -482,7 +489,7 @@ var _ = Describe("Router", func() {
 	})
 
 	It("supports 100 Continue", func() {
-		app := test.NewTestApp([]route.Uri{"foo.vcap.me"}, config.Port, mbusClient, nil, "")
+		app := testcommon.NewTestApp([]route.Uri{"foo.vcap.me"}, config.Port, mbusClient, nil, "")
 		rCh := make(chan *http.Request)
 		app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 			_, err := ioutil.ReadAll(r.Body)
@@ -516,17 +523,16 @@ var _ = Describe("Router", func() {
 		buf := bufio.NewReader(conn)
 		line, err := buf.ReadString('\n')
 		Expect(err).ToNot(HaveOccurred())
-		Expect(strings.Contains(line, "100 Continue")).To(BeTrue())
+		Expect(line).To(ContainSubstring("100 Continue"))
 
 		var rr *http.Request
 		Eventually(rCh).Should(Receive(&rr))
 		Expect(rr).ToNot(BeNil())
-		Expect(rr.Header.Get("Expect")).To(Equal(""))
 	})
 
 	It("X-Vcap-Request-Id header is overwritten", func() {
 		done := make(chan string)
-		app := test.NewTestApp([]route.Uri{"foo.vcap.me"}, config.Port, mbusClient, nil, "")
+		app := testcommon.NewTestApp([]route.Uri{"foo.vcap.me"}, config.Port, mbusClient, nil, "")
 		app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
 			_, err := ioutil.ReadAll(r.Body)
 			Expect(err).NotTo(HaveOccurred())
@@ -568,7 +574,7 @@ var _ = Describe("Router", func() {
 		var resp *http.Response
 		var err error
 
-		mbusClient.Publish("router.register", []byte(`{"dea":"dea1","app":"app1","uris":["test.com"],"host":"1.2.3.4","port":1234,"tags":{},"private_instance_id":"private_instance_id"}`))
+		mbusClient.Publish("router.register", []byte(`{"dea":"dea1","app":"app1","uris":["test.com"],"host":"1.2.3.4","port":1234,"tags":{},"private_instance_id":"private_instance_id", "private_instance_index": "2"}`))
 		time.Sleep(250 * time.Millisecond)
 
 		host := fmt.Sprintf("http://%s:%d/routes", config.Ip, config.Status.Port)
@@ -585,6 +591,34 @@ var _ = Describe("Router", func() {
 		defer resp.Body.Close()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(string(body)).To(MatchRegexp(".*1\\.2\\.3\\.4:1234.*\n"))
+	})
+
+	It("handles the PROXY protocol", func() {
+		app := testcommon.NewTestApp([]route.Uri{"proxy.vcap.me"}, config.Port, mbusClient, nil, "")
+
+		rCh := make(chan string)
+		app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
+			rCh <- r.Header.Get("X-Forwarded-For")
+		})
+		app.Listen()
+		Eventually(func() bool {
+			return appRegistered(registry, app)
+		}).Should(BeTrue())
+
+		host := fmt.Sprintf("proxy.vcap.me:%d", config.Port)
+		conn, err := net.DialTimeout("tcp", host, 10*time.Second)
+		Expect(err).ToNot(HaveOccurred())
+		defer conn.Close()
+
+		fmt.Fprintf(conn, "PROXY TCP4 192.168.0.1 192.168.0.2 12345 80\r\n"+
+			"GET / HTTP/1.0\r\n"+
+			"Host: %s\r\n"+
+			"\r\n", host)
+
+		var rr string
+		Eventually(rCh).Should(Receive(&rr))
+		Expect(rr).ToNot(BeNil())
+		Expect(rr).To(Equal("192.168.0.1"))
 	})
 
 	Context("HTTP keep-alive", func() {
@@ -780,6 +814,74 @@ var _ = Describe("Router", func() {
 			x.CheckLine("hello from server")
 
 			x.Close()
+		})
+	})
+
+	Context("multiple open connections", func() {
+		It("does not return an error handling connections", func() {
+			app := testcommon.NewTestApp([]route.Uri{"app.vcap.me"}, config.Port, mbusClient, nil, "")
+
+			rCh := make(chan string)
+			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
+				rCh <- r.Header.Get("X-Forwarded-For")
+			})
+			app.Listen()
+			Eventually(func() bool {
+				return appRegistered(registry, app)
+			}).Should(BeTrue())
+
+			host := fmt.Sprintf("app.vcap.me:%d", config.Port)
+			existingConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			defer existingConn.Close()
+
+			fmt.Fprintf(existingConn, "GET / HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"\r\n", host)
+
+			newConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			defer newConn.Close()
+
+			fmt.Fprintf(newConn, "GET / HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"\r\n", host)
+
+			var rr string
+			Eventually(rCh).Should(Receive(&rr))
+			Expect(rr).ToNot(BeNil())
+		})
+
+		It("does not hang while handling new connection", func() {
+			app := testcommon.NewTestApp([]route.Uri{"app.vcap.me"}, config.Port, mbusClient, nil, "")
+
+			rCh := make(chan string)
+			app.AddHandler("/", func(w http.ResponseWriter, r *http.Request) {
+				rCh <- r.Header.Get("X-Forwarded-For")
+			})
+			app.Listen()
+			Eventually(func() bool {
+				return appRegistered(registry, app)
+			}).Should(BeTrue())
+
+			host := fmt.Sprintf("app.vcap.me:%d", config.Port)
+			existingConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			defer existingConn.Close()
+
+			fmt.Fprintf(existingConn, "")
+
+			newConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			defer newConn.Close()
+
+			fmt.Fprintf(newConn, "GET / HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"\r\n", host)
+
+			var rr string
+			Eventually(rCh, 1*time.Second).Should(Receive(&rr))
+			Expect(rr).ToNot(BeNil())
 		})
 	})
 

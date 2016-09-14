@@ -7,9 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/common/secure"
-	"github.com/cloudfoundry/gorouter/route_service"
-	"github.com/cloudfoundry/gorouter/test_util"
+	"code.cloudfoundry.org/gorouter/common/secure"
+	"code.cloudfoundry.org/gorouter/route_service"
+	"code.cloudfoundry.org/gorouter/route_service/header"
+	"code.cloudfoundry.org/gorouter/test_util"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -49,7 +50,7 @@ var _ = Describe("Route Services", func() {
 
 			crypto, err := secure.NewAesGCM([]byte(cryptoKey))
 			Expect(err).ToNot(HaveOccurred())
-			_, err = route_service.SignatureFromHeaders(signatureHeader, metadataHeader, crypto)
+			_, err = header.SignatureFromHeaders(signatureHeader, metadataHeader, crypto)
 
 			Expect(err).ToNot(HaveOccurred())
 			Expect(r.Header.Get("X-CF-ApplicationID")).To(Equal(""))
@@ -63,19 +64,19 @@ var _ = Describe("Route Services", func() {
 		crypto, err := secure.NewAesGCM([]byte(cryptoKey))
 		Expect(err).ToNot(HaveOccurred())
 
-		signature := &route_service.Signature{
+		signature := &header.Signature{
 			RequestedTime: time.Now(),
 			ForwardedUrl:  forwardedUrl,
 		}
 
-		signatureHeader, metadataHeader, err = route_service.BuildSignatureAndMetadata(crypto, signature)
+		signatureHeader, metadataHeader, err = header.BuildSignatureAndMetadata(crypto, signature)
 		Expect(err).ToNot(HaveOccurred())
 	})
 
 	Context("with Route Services disabled", func() {
 		BeforeEach(func() {
 			conf.RouteServiceEnabled = false
-			conf.SSLSkipValidation = true
+			conf.SkipSSLValidation = true
 			routeServiceHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				Fail("Should not get here into Route Service")
 			})
@@ -102,7 +103,7 @@ var _ = Describe("Route Services", func() {
 	Context("with Route Services enabled", func() {
 		BeforeEach(func() {
 			conf.RouteServiceEnabled = true
-			conf.SSLSkipValidation = true
+			conf.SkipSSLValidation = true
 		})
 
 		Context("when recommendHttps is set to false", func() {
@@ -115,7 +116,7 @@ var _ = Describe("Route Services", func() {
 
 					crypto, err := secure.NewAesGCM([]byte(cryptoKey))
 					Expect(err).ToNot(HaveOccurred())
-					_, err = route_service.SignatureFromHeaders(signatureHeader, metadataHeader, crypto)
+					_, err = header.SignatureFromHeaders(signatureHeader, metadataHeader, crypto)
 
 					Expect(err).ToNot(HaveOccurred())
 					Expect(r.Header.Get("X-CF-ApplicationID")).To(Equal(""))
@@ -145,9 +146,9 @@ var _ = Describe("Route Services", func() {
 		})
 	})
 
-	Context("with SSLSkipValidation enabled", func() {
+	Context("with SkipSSLValidation enabled", func() {
 		BeforeEach(func() {
-			conf.SSLSkipValidation = true
+			conf.SkipSSLValidation = true
 		})
 
 		Context("when a request does not have a valid Route service signature header", func() {
@@ -224,6 +225,35 @@ var _ = Describe("Route Services", func() {
 				Expect(res.StatusCode).To(Equal(http.StatusOK))
 			})
 
+			Context("when request has Host header with a port", func() {
+				It("routes to backend instance and disregards port in Host header", func() {
+					ln := registerHandlerWithRouteService(r, "my_host.com", "https://"+routeServiceListener.Addr().String(), func(conn *test_util.HttpConn) {
+						conn.ReadRequest()
+						out := &bytes.Buffer{}
+						out.WriteString("backend instance")
+						res := &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       ioutil.NopCloser(out),
+						}
+						conn.WriteResponse(res)
+					})
+					defer ln.Close()
+
+					conn := dialProxy(proxyServer)
+
+					req := test_util.NewRequest("GET", "my_host.com", "/resource+9-9_9?query=123&query$2=345#page1..5", nil)
+					req.Host = "my_host.com:4444"
+					req.Header.Set(route_service.RouteServiceSignature, signatureHeader)
+					req.Header.Set(route_service.RouteServiceMetadata, metadataHeader)
+					req.Header.Set(route_service.RouteServiceForwardedUrl, "http://some-backend-url")
+					conn.WriteRequest(req)
+
+					res, body := conn.ReadResponse()
+					Expect(body).To(ContainSubstring("backend instance"))
+					Expect(res.StatusCode).To(Equal(http.StatusOK))
+				})
+			})
+
 			Context("and is forwarding to a route service on CF", func() {
 				It("does not strip the signature header", func() {
 					ln := registerHandler(r, "my_host.com", func(conn *test_util.HttpConn) {
@@ -257,7 +287,7 @@ var _ = Describe("Route Services", func() {
 				Expect(err).To(BeNil())
 
 				// register route service, should NOT route to it
-				registerAddr(r, "my_host.com", "https://"+routeServiceListener.Addr().String(), ip, "instanceId")
+				registerAddr(r, "my_host.com", "https://"+routeServiceListener.Addr().String(), ip, "instanceId", "1")
 
 				conn := dialProxy(proxyServer)
 
@@ -396,11 +426,11 @@ var _ = Describe("Route Services", func() {
 
 			Context("when a request has an expired Route service signature header", func() {
 				BeforeEach(func() {
-					signature := &route_service.Signature{
+					signature := &header.Signature{
 						RequestedTime: time.Now().Add(-10 * time.Hour),
 						ForwardedUrl:  forwardedUrl,
 					}
-					signatureHeader, metadataHeader, _ = route_service.BuildSignatureAndMetadata(crypto, signature)
+					signatureHeader, metadataHeader, _ = header.BuildSignatureAndMetadata(crypto, signature)
 				})
 
 				It("returns an route service request expired error", func() {

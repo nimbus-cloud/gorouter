@@ -4,20 +4,26 @@ import (
 	"io/ioutil"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
-	"github.com/apcera/nats"
+	"code.cloudfoundry.org/gorouter/common"
+	"code.cloudfoundry.org/gorouter/common/health"
+	router_http "code.cloudfoundry.org/gorouter/common/http"
+	"code.cloudfoundry.org/gorouter/common/schema"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/metrics/monitor"
+	"code.cloudfoundry.org/gorouter/proxy"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/varz"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/localip"
+	"code.cloudfoundry.org/routing-api/models"
+	"github.com/armon/go-proxyproto"
 	"github.com/cloudfoundry/dropsonde"
-	vcap "github.com/cloudfoundry/gorouter/common"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/varz"
-	"github.com/cloudfoundry/yagnats"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/localip"
+	"github.com/nats-io/nats"
 
 	"bytes"
 	"compress/zlib"
@@ -32,15 +38,20 @@ import (
 
 var DrainTimeout = errors.New("router: Drain timeout")
 
+const (
+	emitInterval               = 1 * time.Second
+	proxyProtocolHeaderTimeout = 100 * time.Millisecond
+)
+
 var noDeadline = time.Time{}
 
 type Router struct {
 	config     *config.Config
 	proxy      proxy.Proxy
-	mbusClient yagnats.NATSConn
+	mbusClient *nats.Conn
 	registry   *registry.RouteRegistry
 	varz       varz.Varz
-	component  *vcap.VcapComponent
+	component  *common.VcapComponent
 
 	listener         net.Listener
 	tlsListener      net.Listener
@@ -53,22 +64,35 @@ type Router struct {
 	tlsServeDone     chan struct{}
 	stopping         bool
 	stopLock         sync.Mutex
+	uptimeMonitor    *monitor.Uptime
 
 	logger  lager.Logger
 	errChan chan error
 }
 
-func NewRouter(logger lager.Logger, cfg *config.Config, p proxy.Proxy, mbusClient yagnats.NATSConn, r *registry.RouteRegistry,
-	v varz.Varz, logCounter *vcap.LogCounter, errChan chan error) (*Router, error) {
+type RegistryMessage struct {
+	Host                    string            `json:"host"`
+	Port                    uint16            `json:"port"`
+	Uris                    []route.Uri       `json:"uris"`
+	Tags                    map[string]string `json:"tags"`
+	App                     string            `json:"app"`
+	StaleThresholdInSeconds int               `json:"stale_threshold_in_seconds"`
+	RouteServiceUrl         string            `json:"route_service_url"`
+	PrivateInstanceId       string            `json:"private_instance_id"`
+	PrivateInstanceIndex    string            `json:"private_instance_index"`
+}
+
+func NewRouter(logger lager.Logger, cfg *config.Config, p proxy.Proxy, mbusClient *nats.Conn, r *registry.RouteRegistry,
+	v varz.Varz, logCounter *schema.LogCounter, errChan chan error) (*Router, error) {
 
 	var host string
 	if cfg.Status.Port != 0 {
 		host = fmt.Sprintf("%s:%d", cfg.Ip, cfg.Status.Port)
 	}
 
-	varz := &vcap.Varz{
+	varz := &health.Varz{
 		UniqueVarz: v,
-		GenericVarz: vcap.GenericVarz{
+		GenericVarz: health.GenericVarz{
 			Type:        "Router",
 			Index:       cfg.Index,
 			Host:        host,
@@ -77,9 +101,9 @@ func NewRouter(logger lager.Logger, cfg *config.Config, p proxy.Proxy, mbusClien
 		},
 	}
 
-	healthz := &vcap.Healthz{}
+	healthz := &health.Healthz{}
 
-	component := &vcap.VcapComponent{
+	component := &common.VcapComponent{
 		Config:  cfg,
 		Varz:    varz,
 		Healthz: healthz,
@@ -114,6 +138,7 @@ func NewRouter(logger lager.Logger, cfg *config.Config, p proxy.Proxy, mbusClien
 		return nil, err
 	}
 
+	router.uptimeMonitor = monitor.NewUptime(emitInterval)
 	return router, nil
 }
 
@@ -129,7 +154,7 @@ func (h *gorouterHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) 
 }
 
 func setRequestXVcapRequestId(request *http.Request, logger lager.Logger) {
-	uuid, err := vcap.GenerateUUID()
+	uuid, err := common.GenerateUUID()
 	if err == nil {
 		request.Header.Set(router_http.VcapRequestIdHeader, uuid)
 		if logger != nil {
@@ -151,10 +176,10 @@ func (r *Router) Run(signals <-chan os.Signal, ready chan<- struct{}) error {
 	// Kickstart sending start messages
 	r.SendStartMessage()
 
-	r.mbusClient.AddReconnectedCB(func(conn *nats.Conn) {
+	r.mbusClient.Opts.ReconnectedCB = func(conn *nats.Conn) {
 		r.logger.Info(fmt.Sprintf("Reconnecting to NATS server %s...", conn.Opts.Url))
 		r.SendStartMessage()
-	})
+	}
 
 	// Schedule flushing active app's app_id
 	r.ScheduleFlushApps()
@@ -164,6 +189,7 @@ func (r *Router) Run(signals <-chan os.Signal, ready chan<- struct{}) error {
 	if r.config.StartResponseDelayInterval != 0 {
 		r.logger.Info(fmt.Sprintf("Waiting %s before listening...", r.config.StartResponseDelayInterval))
 		time.Sleep(r.config.StartResponseDelayInterval)
+		r.logger.Info("completed-wait")
 	}
 
 	handler := gorouterHandler{handler: dropsonde.InstrumentedHandler(r.proxy), logger: r.logger}
@@ -191,7 +217,7 @@ func (r *Router) Run(signals <-chan os.Signal, ready chan<- struct{}) error {
 	}
 
 	r.logger.Info("gorouter.started")
-
+	go r.uptimeMonitor.Start()
 	close(ready)
 
 	r.OnErrOrSignal(signals, r.errChan)
@@ -262,15 +288,22 @@ func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
 
 		tlsListener, err := tls.Listen("tcp", fmt.Sprintf(":%d", r.config.SSLPort), tlsConfig)
 		if err != nil {
-			r.logger.Fatal("tls.Listen: %s", err)
+			r.logger.Fatal("tls-listener-error", err)
 			return err
 		}
 
 		r.tlsListener = tlsListener
-		r.logger.Info(fmt.Sprintf("Listening on %s", tlsListener.Addr()))
+		if r.config.EnablePROXY {
+			r.tlsListener = &proxyproto.Listener{
+				Listener:           tlsListener,
+				ProxyHeaderTimeout: proxyProtocolHeaderTimeout,
+			}
+		}
+
+		r.logger.Info("tls-listener-started", lager.Data{"address": r.tlsListener.Addr()})
 
 		go func() {
-			err := server.Serve(tlsListener)
+			err := server.Serve(r.tlsListener)
 			r.stopLock.Lock()
 			if !r.stopping {
 				errChan <- err
@@ -285,15 +318,22 @@ func (r *Router) serveHTTPS(server *http.Server, errChan chan error) error {
 func (r *Router) serveHTTP(server *http.Server, errChan chan error) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", r.config.Port))
 	if err != nil {
-		r.logger.Fatal("net.Listen: %s", err)
+		r.logger.Fatal("tcp-listener-error", err)
 		return err
 	}
 
 	r.listener = listener
-	r.logger.Info(fmt.Sprintf("Listening on %s", listener.Addr()))
+	if r.config.EnablePROXY {
+		r.listener = &proxyproto.Listener{
+			Listener:           listener,
+			ProxyHeaderTimeout: proxyProtocolHeaderTimeout,
+		}
+	}
+
+	r.logger.Info("tcp-listener-started", lager.Data{"address": r.listener.Addr()})
 
 	go func() {
-		err := server.Serve(listener)
+		err := server.Serve(r.listener)
 		r.stopLock.Lock()
 		if !r.stopping {
 			errChan <- err
@@ -350,6 +390,7 @@ func (r *Router) Stop() {
 	r.connLock.Unlock()
 
 	r.component.Stop()
+	r.uptimeMonitor.Stop()
 	r.logger.Info(
 		"gorouter.stopped",
 		lager.Data{
@@ -388,8 +429,6 @@ func (r *Router) RegisterComponent() {
 
 func (r *Router) SubscribeRegister() {
 	r.subscribeRegistry("router.register", func(registryMessage *RegistryMessage) {
-		r.logger.Debug("Got router.register:", lager.Data{"registry Message": registryMessage})
-
 		for _, uri := range registryMessage.Uris {
 			r.registry.Register(
 				uri,
@@ -401,8 +440,6 @@ func (r *Router) SubscribeRegister() {
 
 func (r *Router) SubscribeUnregister() {
 	r.subscribeRegistry("router.unregister", func(registryMessage *RegistryMessage) {
-		r.logger.Debug("Got router.unregister:", lager.Data{"registry Message": registryMessage})
-
 		for _, uri := range registryMessage.Uris {
 			r.registry.Unregister(
 				uri,
@@ -432,6 +469,9 @@ func (r *Router) SendStartMessage() {
 
 	// Send start message once at start
 	err = r.mbusClient.Publish("router.start", b)
+	if err != nil {
+		r.logger.Error("failed-to-publish-greet-message", err)
+	}
 }
 
 func (r *Router) ScheduleFlushApps() {
@@ -522,7 +562,7 @@ func (r *Router) greetMessage() ([]byte, error) {
 		return nil, err
 	}
 
-	d := vcap.RouterStart{
+	d := common.RouterStart{
 		Id:    r.component.Varz.UUID,
 		Hosts: []string{host},
 		MinimumRegisterIntervalInSeconds: r.config.StartResponseDelayIntervalInSeconds,
@@ -545,9 +585,6 @@ func (r *Router) subscribeRegistry(subject string, successCallback func(*Registr
 			return
 		}
 
-		logMessage := fmt.Sprintf("%s: Received message", subject)
-		r.logger.Debug(logMessage, lager.Data{"message": msg})
-
 		if !msg.ValidateMessage() {
 			logMessage := fmt.Sprintf("%s: Unable to validate message. route_service_url must be https", subject)
 			r.logger.Info(logMessage, lager.Data{"message": msg})
@@ -561,4 +598,21 @@ func (r *Router) subscribeRegistry(subject string, successCallback func(*Registr
 	if err != nil {
 		r.logger.Error(fmt.Sprintf("Error subscribing to %s ", subject), err)
 	}
+}
+
+func (rm *RegistryMessage) makeEndpoint() *route.Endpoint {
+	return route.NewEndpoint(
+		rm.App,
+		rm.Host,
+		rm.Port,
+		rm.PrivateInstanceId,
+		rm.PrivateInstanceIndex,
+		rm.Tags,
+		rm.StaleThresholdInSeconds,
+		rm.RouteServiceUrl,
+		models.ModificationTag{})
+}
+
+func (rm *RegistryMessage) ValidateMessage() bool {
+	return rm.RouteServiceUrl == "" || strings.HasPrefix(rm.RouteServiceUrl, "https")
 }

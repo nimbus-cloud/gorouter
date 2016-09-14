@@ -2,16 +2,16 @@ package registry
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"sync"
 	"time"
-	"net"
 
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/metrics"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/yagnats"
-	"github.com/pivotal-golang/lager"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/metrics/reporter"
+	"code.cloudfoundry.org/gorouter/registry/container"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/lager"
 )
 
 type RegistryInterface interface {
@@ -25,19 +25,29 @@ type RegistryInterface interface {
 	MarshalJSON() ([]byte, error)
 }
 
+type PruneStatus int
+
+const (
+	CONNECTED = PruneStatus(iota)
+	DISCONNECTED
+)
+
 type RouteRegistry struct {
 	sync.RWMutex
 
 	logger lager.Logger
 
-	byUri *Trie
+	// Access to the Trie datastructure should be governed by the RWMutex of RouteRegistry
+	byUri *container.Trie
+
+	// used for ability to suspend pruning
+	suspendPruning func() bool
+	pruningStatus  PruneStatus
 
 	pruneStaleDropletsInterval time.Duration
 	dropletStaleThreshold      time.Duration
 
-	messageBus yagnats.NATSConn
-
-	reporter metrics.RouteRegistryReporter
+	reporter reporter.RouteRegistryReporter
 
 	ticker           *time.Ticker
 	timeOfLastUpdate time.Time
@@ -45,23 +55,24 @@ type RouteRegistry struct {
 	preferredNetwork *net.IPNet
 }
 
-func NewRouteRegistry(logger lager.Logger, c *config.Config, mbus yagnats.NATSConn, reporter metrics.RouteRegistryReporter) *RouteRegistry {
+func NewRouteRegistry(logger lager.Logger, c *config.Config, reporter reporter.RouteRegistryReporter) *RouteRegistry {
 	r := &RouteRegistry{}
 	r.logger = logger
-	r.byUri = NewTrie()
+	r.byUri = container.NewTrie()
 
 	r.pruneStaleDropletsInterval = c.PruneStaleDropletsInterval
 	r.dropletStaleThreshold = c.DropletStaleThreshold
+	r.suspendPruning = func() bool { return false }
 
 	r.preferredNetwork = c.PreferredNetwork
 
-	r.messageBus = mbus
 	r.reporter = reporter
 	return r
 }
 
 func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 	t := time.Now()
+	data := lager.Data{"uri": uri, "backend": endpoint.CanonicalAddr(), "modification_tag": endpoint.ModificationTag}
 
 	r.reporter.CaptureRegistryMessage(endpoint)
 
@@ -69,29 +80,42 @@ func (r *RouteRegistry) Register(uri route.Uri, endpoint *route.Endpoint) {
 
 	uri = uri.RouteKey()
 
-	pool, found := r.byUri.Find(uri)
-	if !found {
+	pool := r.byUri.Find(uri)
+	if pool == nil {
 		contextPath := parseContextPath(uri)
 		pool = route.NewPool(r.dropletStaleThreshold/4, contextPath, r.preferredNetwork)
 		r.byUri.Insert(uri, pool)
+		r.logger.Debug("uri-added", lager.Data{"uri": uri})
 	}
 
-	pool.Put(endpoint)
+	endpointAdded := pool.Put(endpoint)
 
 	r.timeOfLastUpdate = t
 	r.Unlock()
+
+	if endpointAdded {
+		r.logger.Debug("endpoint-registered", data)
+	} else {
+		r.logger.Debug("endpoint-not-registered", data)
+	}
 }
 
 func (r *RouteRegistry) Unregister(uri route.Uri, endpoint *route.Endpoint) {
+	data := lager.Data{"uri": uri, "backend": endpoint.CanonicalAddr(), "modification_tag": endpoint.ModificationTag}
 	r.reporter.CaptureRegistryMessage(endpoint)
 
 	r.Lock()
 
 	uri = uri.RouteKey()
 
-	pool, found := r.byUri.Find(uri)
-	if found {
-		pool.Remove(endpoint)
+	pool := r.byUri.Find(uri)
+	if pool != nil {
+		endpointRemoved := pool.Remove(endpoint)
+		if endpointRemoved {
+			r.logger.Debug("endpoint-unregistered", data)
+		} else {
+			r.logger.Debug("endpoint-not-unregistered", data)
+		}
 
 		if pool.IsEmpty() {
 			r.byUri.Delete(uri)
@@ -106,10 +130,10 @@ func (r *RouteRegistry) Lookup(uri route.Uri) *route.Pool {
 
 	uri = uri.RouteKey()
 	var err error
-	pool, found := r.byUri.MatchUri(uri)
-	for !found && err == nil {
+	pool := r.byUri.MatchUri(uri)
+	for pool == nil && err == nil {
 		uri, err = uri.NextWildcard()
-		pool, found = r.byUri.MatchUri(uri)
+		pool = r.byUri.MatchUri(uri)
 	}
 
 	r.RUnlock()
@@ -178,11 +202,49 @@ func (r *RouteRegistry) MarshalJSON() ([]byte, error) {
 
 func (r *RouteRegistry) pruneStaleDroplets() {
 	r.Lock()
-	r.byUri.EachNodeWithPool(func(t *Trie) {
-		t.Pool.PruneEndpoints(r.dropletStaleThreshold)
+	defer r.Unlock()
+
+	// suspend pruning if option enabled and if NATS is unavailable
+	if r.suspendPruning() {
+		r.logger.Debug("prune-suspended")
+		r.pruningStatus = DISCONNECTED
+		return
+	} else {
+		if r.pruningStatus == DISCONNECTED {
+			// if we are coming back from being disconnected from source,
+			// bulk update routes / mark updated to avoid pruning right away
+			r.logger.Debug("prune-unsuspended-refresh-routes-start")
+			r.freshenRoutes()
+			r.logger.Debug("prune-unsuspended-refresh-routes-complete")
+		}
+		r.pruningStatus = CONNECTED
+	}
+
+	r.byUri.EachNodeWithPool(func(t *container.Trie) {
+		endpoints := t.Pool.PruneEndpoints(r.dropletStaleThreshold)
 		t.Snip()
+		if len(endpoints) > 0 {
+			addresses := []string{}
+			for _, e := range endpoints {
+				addresses = append(addresses, e.CanonicalAddr())
+			}
+			r.logger.Debug("prune", lager.Data{"uri": t.ToPath(), "endpoints": addresses})
+		}
 	})
+}
+
+func (r *RouteRegistry) SuspendPruning(f func() bool) {
+	r.Lock()
+	r.suspendPruning = f
 	r.Unlock()
+}
+
+// bulk update to mark pool / endpoints as updated
+func (r *RouteRegistry) freshenRoutes() {
+	now := time.Now()
+	r.byUri.EachNodeWithPool(func(t *container.Trie) {
+		t.Pool.MarkUpdated(now)
+	})
 }
 
 func parseContextPath(uri route.Uri) string {

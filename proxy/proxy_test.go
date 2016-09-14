@@ -3,7 +3,6 @@ package proxy_test
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -18,15 +17,14 @@ import (
 	"strings"
 	"time"
 
+	router_http "code.cloudfoundry.org/gorouter/common/http"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"code.cloudfoundry.org/routing-api/models"
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/dropsonde/emitter/fake"
 	"github.com/cloudfoundry/dropsonde/factories"
-	router_http "github.com/cloudfoundry/gorouter/common/http"
-	"github.com/cloudfoundry/gorouter/metrics"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/stats"
-	"github.com/cloudfoundry/gorouter/test_util"
 	"github.com/cloudfoundry/sonde-go/events"
 	"github.com/nu7hatch/gouuid"
 
@@ -37,16 +35,6 @@ import (
 const uuid_regex = `^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$`
 
 type connHandler func(*test_util.HttpConn)
-
-type nullVarz struct{}
-
-func (_ nullVarz) MarshalJSON() ([]byte, error)                                                     { return json.Marshal(nil) }
-func (_ nullVarz) ActiveApps() *stats.ActiveApps                                                    { return stats.NewActiveApps() }
-func (_ nullVarz) CaptureBadRequest(*http.Request)                                                  {}
-func (_ nullVarz) CaptureBadGateway(*http.Request)                                                  {}
-func (_ nullVarz) CaptureRoutingRequest(b *route.Endpoint, req *http.Request)                       {}
-func (_ nullVarz) CaptureRoutingResponse(*route.Endpoint, *http.Response, time.Time, time.Duration) {}
-func (_ nullVarz) CaptureRegistryMessage(msg metrics.ComponentTagged)                               {}
 
 var _ = Describe("Proxy", func() {
 
@@ -249,7 +237,6 @@ var _ = Describe("Proxy", func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 	})
 
-
 	It("responds to http/1.1 with absolute-form request that has encoded characters in the path", func() {
 		ln := registerHandler(r, "test.io/my%20path/your_path", func(conn *test_util.HttpConn) {
 			conn.CheckLine("GET http://test.io/my%20path/your_path HTTP/1.1")
@@ -322,22 +309,21 @@ var _ = Describe("Proxy", func() {
 		Expect(body).To(Equal("404 Not Found: Requested route ('unknown') does not exist.\n"))
 	})
 
-	It("responds to host with malicious script with 404", func() {
+	It("responds to host with malicious script with 400", func() {
 		conn := dialProxy(proxyServer)
 
 		req := test_util.NewRequest("GET", "<html><header><script>alert(document.cookie);</script></header><body/></html>", "/", nil)
 		conn.WriteRequest(req)
 
 		resp, body := conn.ReadResponse()
-		Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
-		Expect(resp.Header.Get("X-Cf-RouterError")).To(Equal("unknown_route"))
-		Expect(body).To(Equal("404 Not Found: Requested route does not exist.\n"))
+		Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
+		Expect(body).To(ContainSubstring("malformed Host header"))
 	})
 
 	It("responds with 404 for a not found host name with only valid characters", func() {
 		conn := dialProxy(proxyServer)
 
-		req := test_util.NewRequest("GET", "abcdefghijklmnopqrstuvwxyz.0123456789-ABCDEFGHIJKLMNOPQRSTUVW.XYZ ", "/", nil)
+		req := test_util.NewRequest("GET", "abcdefghijklmnopqrstuvwxyz.0123456789-ABCDEFGHIJKLMNOPQRSTUVW.XYZ", "/", nil)
 		conn.WriteRequest(req)
 
 		resp, body := conn.ReadResponse()
@@ -630,8 +616,8 @@ var _ = Describe("Proxy", func() {
 		}
 
 		Eventually(findStartStopEvent).ShouldNot(BeNil())
-		Expect(findStartStopEvent().GetParentRequestId()).To(Equal(factories.NewUUID(requestId)))
 
+		Expect(findStartStopEvent().RequestId).To(Equal(factories.NewUUID(requestId)))
 		conn.ReadResponse()
 	})
 
@@ -1066,7 +1052,9 @@ var _ = Describe("Proxy", func() {
 
 	It("retries when failed endpoints exist", func() {
 		ln := registerHandler(r, "retries", func(conn *test_util.HttpConn) {
-			conn.CheckLine("GET / HTTP/1.1")
+			req, _ := conn.ReadRequest()
+			Expect(req.Method).To(Equal("GET"))
+			Expect(req.Host).To(Equal("retries"))
 			resp := test_util.NewResponse(http.StatusOK)
 			conn.WriteResponse(resp)
 			conn.Close()
@@ -1075,12 +1063,15 @@ var _ = Describe("Proxy", func() {
 
 		ip, err := net.ResolveTCPAddr("tcp", "localhost:81")
 		Expect(err).To(BeNil())
-		registerAddr(r, "retries", "", ip, "instanceId")
+		registerAddr(r, "retries", "", ip, "instanceId", "2")
 
 		for i := 0; i < 5; i++ {
+			body := &bytes.Buffer{}
+			body.WriteString("use an actual body")
+
 			conn := dialProxy(proxyServer)
 
-			req := test_util.NewRequest("GET", "retries", "/", nil)
+			req := test_util.NewRequest("GET", "retries", "/", ioutil.NopCloser(body))
 			conn.WriteRequest(req)
 			resp, _ := conn.ReadResponse()
 
@@ -1293,14 +1284,14 @@ func readResponse(conn *test_util.HttpConn) (*http.Response, string) {
 	return res, body
 }
 
-func registerAddr(reg *registry.RouteRegistry, path string, routeServiceUrl string, addr net.Addr, instanceId string) {
+func registerAddr(reg *registry.RouteRegistry, path string, routeServiceUrl string, addr net.Addr, instanceId string, instanceIndex string) {
 	host, portStr, err := net.SplitHostPort(addr.String())
 	Expect(err).NotTo(HaveOccurred())
 
 	port, err := strconv.Atoi(portStr)
 	Expect(err).NotTo(HaveOccurred())
 
-	reg.Register(route.Uri(path), route.NewEndpoint("", host, uint16(port), instanceId, nil, -1, routeServiceUrl))
+	reg.Register(route.Uri(path), route.NewEndpoint("", host, uint16(port), instanceId, instanceIndex, nil, -1, routeServiceUrl, models.ModificationTag{}))
 }
 
 func registerHandler(reg *registry.RouteRegistry, path string, handler connHandler) net.Listener {
@@ -1317,7 +1308,7 @@ func registerHandlerWithInstanceId(reg *registry.RouteRegistry, path string, rou
 
 	go runBackendInstance(ln, handler)
 
-	registerAddr(reg, path, routeServiceUrl, ln.Addr(), instanceId)
+	registerAddr(reg, path, routeServiceUrl, ln.Addr(), instanceId, "2")
 
 	return ln
 }
@@ -1357,7 +1348,7 @@ func dialProxy(proxyServer net.Listener) *test_util.HttpConn {
 }
 
 func newTlsListener(listener net.Listener) net.Listener {
-	cert, err := tls.LoadX509KeyPair("../test/assets/public.pem", "../test/assets/private.pem")
+	cert, err := tls.LoadX509KeyPair("../test/assets/certs/server.pem", "../test/assets/certs/server.key")
 	Expect(err).ToNot(HaveOccurred())
 
 	tlsConfig := &tls.Config{

@@ -1,17 +1,17 @@
 package common_test
 
 import (
-	"github.com/apcera/nats"
-	. "github.com/cloudfoundry/gorouter/common"
-	"github.com/cloudfoundry/gorouter/test_util"
+	. "code.cloudfoundry.org/gorouter/common"
+	"code.cloudfoundry.org/gorouter/common/health"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"github.com/nats-io/nats"
 
-	"github.com/cloudfoundry/yagnats"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
+	"code.cloudfoundry.org/localip"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
-	"github.com/pivotal-golang/localip"
 
 	"encoding/json"
 	"fmt"
@@ -19,8 +19,6 @@ import (
 	"net"
 	"net/http"
 	"time"
-
-	"github.com/cloudfoundry/gunk/natsrunner"
 )
 
 type MarshalableValue struct {
@@ -34,15 +32,15 @@ func (m *MarshalableValue) MarshalJSON() ([]byte, error) {
 var _ = Describe("Component", func() {
 	var (
 		component *VcapComponent
-		varz      *Varz
+		varz      *health.Varz
 	)
 
 	BeforeEach(func() {
 		port, err := localip.LocalPort()
 		Expect(err).ToNot(HaveOccurred())
 
-		varz = &Varz{
-			GenericVarz: GenericVarz{
+		varz = &health.Varz{
+			GenericVarz: health.GenericVarz{
 				Host:        fmt.Sprintf("127.0.0.1:%d", port),
 				Credentials: []string{"username", "password"},
 			},
@@ -153,13 +151,13 @@ var _ = Describe("Component", func() {
 	})
 
 	Describe("Register", func() {
-		var mbusClient yagnats.NATSConn
-		var natsRunner *natsrunner.NATSRunner
+		var mbusClient *nats.Conn
+		var natsRunner *test_util.NATSRunner
 		var logger lager.Logger
 
 		BeforeEach(func() {
 			natsPort := test_util.NextAvailPort()
-			natsRunner = natsrunner.NewNATSRunner(int(natsPort))
+			natsRunner = test_util.NewNATSRunner(int(natsPort))
 			natsRunner.Start()
 			mbusClient = natsRunner.MessageBus
 

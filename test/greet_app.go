@@ -4,13 +4,13 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/cloudfoundry/yagnats"
-
-	"github.com/cloudfoundry/gorouter/route"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/test/common"
+	"github.com/nats-io/nats"
 )
 
-func NewGreetApp(urls []route.Uri, rPort uint16, mbusClient yagnats.NATSConn, tags map[string]string) *TestApp {
-	app := NewTestApp(urls, rPort, mbusClient, tags, "")
+func NewGreetApp(urls []route.Uri, rPort uint16, mbusClient *nats.Conn, tags map[string]string) *common.TestApp {
+	app := common.NewTestApp(urls, rPort, mbusClient, tags, "")
 	app.AddHandler("/", greetHandler)
 
 	return app

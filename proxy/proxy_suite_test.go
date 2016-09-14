@@ -5,22 +5,22 @@ import (
 	"net"
 	"net/http"
 
+	"code.cloudfoundry.org/gorouter/access_log"
+	"code.cloudfoundry.org/gorouter/common/secure"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/proxy"
+	"code.cloudfoundry.org/gorouter/proxy/test_helpers"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
 	"github.com/cloudfoundry/dropsonde"
 	"github.com/cloudfoundry/dropsonde/emitter/fake"
-	"github.com/cloudfoundry/gorouter/access_log"
-	"github.com/cloudfoundry/gorouter/common/secure"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/test_util"
-	"github.com/cloudfoundry/yagnats/fakeyagnats"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
 
 	"testing"
 	"time"
 
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
+	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -59,8 +59,7 @@ var _ = BeforeEach(func() {
 
 var _ = JustBeforeEach(func() {
 	var err error
-	mbus := fakeyagnats.Connect()
-	r = registry.NewRouteRegistry(logger, conf, mbus, new(fakes.FakeRouteRegistryReporter))
+	r = registry.NewRouteRegistry(logger, conf, new(fakes.FakeRouteRegistryReporter))
 
 	fakeEmitter := fake.NewFakeEventEmitter("fake")
 	dropsonde.InitializeWithEmitter(fakeEmitter)
@@ -74,7 +73,7 @@ var _ = JustBeforeEach(func() {
 
 	tlsConfig := &tls.Config{
 		CipherSuites:       conf.CipherSuites,
-		InsecureSkipVerify: conf.SSLSkipValidation,
+		InsecureSkipVerify: conf.SkipSSLValidation,
 	}
 
 	p = proxy.NewProxy(proxy.ProxyArgs{
@@ -83,7 +82,7 @@ var _ = JustBeforeEach(func() {
 		TraceKey:                   conf.TraceKey,
 		Logger:                     logger,
 		Registry:                   r,
-		Reporter:                   nullVarz{},
+		Reporter:                   test_helpers.NullVarz{},
 		AccessLogger:               accessLog,
 		SecureCookies:              conf.SecureCookies,
 		TLSConfig:                  tlsConfig,

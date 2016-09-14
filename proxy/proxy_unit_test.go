@@ -6,17 +6,17 @@ import (
 	"net/http/httptest"
 	"time"
 
-	fakelogger "github.com/cloudfoundry/gorouter/access_log/fakes"
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
-	"github.com/cloudfoundry/gorouter/proxy"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/cloudfoundry/gorouter/test_util"
-	"github.com/cloudfoundry/yagnats/fakeyagnats"
+	fakelogger "code.cloudfoundry.org/gorouter/access_log/fakes"
+	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
+	"code.cloudfoundry.org/gorouter/proxy"
+	"code.cloudfoundry.org/gorouter/proxy/test_helpers"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/gorouter/test_util"
+	"code.cloudfoundry.org/lager/lagertest"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gbytes"
-	"github.com/pivotal-golang/lager/lagertest"
 )
 
 var _ = Describe("Proxy Unit tests", func() {
@@ -24,29 +24,26 @@ var _ = Describe("Proxy Unit tests", func() {
 		proxyObj         proxy.Proxy
 		fakeAccessLogger *fakelogger.FakeAccessLogger
 		logger           *lagertest.TestLogger
-
-		r *registry.RouteRegistry
 	)
 
 	Context("ServeHTTP", func() {
 		BeforeEach(func() {
 			tlsConfig := &tls.Config{
 				CipherSuites:       conf.CipherSuites,
-				InsecureSkipVerify: conf.SSLSkipValidation,
+				InsecureSkipVerify: conf.SkipSSLValidation,
 			}
 
 			fakeAccessLogger = &fakelogger.FakeAccessLogger{}
 
-			mbus := fakeyagnats.Connect()
 			logger = lagertest.NewTestLogger("test")
-			r = registry.NewRouteRegistry(logger, conf, mbus, new(fakes.FakeRouteRegistryReporter))
+			r = registry.NewRouteRegistry(logger, conf, new(fakes.FakeRouteRegistryReporter))
 
 			proxyObj = proxy.NewProxy(proxy.ProxyArgs{
 				EndpointTimeout:     conf.EndpointTimeout,
 				Ip:                  conf.Ip,
 				TraceKey:            conf.TraceKey,
 				Registry:            r,
-				Reporter:            nullVarz{},
+				Reporter:            test_helpers.NullVarz{},
 				Logger:              logger,
 				AccessLogger:        fakeAccessLogger,
 				SecureCookies:       conf.SecureCookies,

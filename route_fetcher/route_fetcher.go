@@ -5,16 +5,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cloudfoundry-incubator/routing-api"
-	"github.com/cloudfoundry-incubator/routing-api/db"
-	uaa_client "github.com/cloudfoundry-incubator/uaa-go-client"
-	"github.com/cloudfoundry-incubator/uaa-go-client/schema"
+	"code.cloudfoundry.org/clock"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/routing-api"
+	"code.cloudfoundry.org/routing-api/models"
+	uaa_client "code.cloudfoundry.org/uaa-go-client"
+	"code.cloudfoundry.org/uaa-go-client/schema"
 	"github.com/cloudfoundry/dropsonde/metrics"
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	"github.com/pivotal-golang/clock"
-	"github.com/pivotal-golang/lager"
 )
 
 type RouteFetcher struct {
@@ -24,7 +24,7 @@ type RouteFetcher struct {
 	SubscriptionRetryIntervalInSeconds int
 
 	logger          lager.Logger
-	endpoints       []db.Route
+	endpoints       []models.Route
 	client          routing_api.Client
 	stopEventSource int32
 	eventSource     atomic.Value
@@ -49,18 +49,19 @@ func NewRouteFetcher(logger lager.Logger, uaaClient uaa_client.Client, routeRegi
 
 		client:       client,
 		logger:       logger,
-		eventChannel: make(chan routing_api.Event),
+		eventChannel: make(chan routing_api.Event, 1024),
 		clock:        clock,
 	}
 }
 
 func (r *RouteFetcher) Run(signals <-chan os.Signal, ready chan<- struct{}) error {
-	close(ready)
 	r.startEventCycle()
 
 	ticker := r.clock.NewTicker(r.FetchRoutesInterval)
 	r.logger.Debug("created-ticker", lager.Data{"interval": r.FetchRoutesInterval})
 	r.logger.Info("syncer-started")
+
+	close(ready)
 	for {
 		select {
 		case <-ticker.C():
@@ -68,7 +69,6 @@ func (r *RouteFetcher) Run(signals <-chan os.Signal, ready chan<- struct{}) erro
 			if err != nil {
 				r.logger.Error("Failed to fetch routes: ", err)
 			}
-
 		case e := <-r.eventChannel:
 			r.HandleEvent(e)
 
@@ -129,15 +129,16 @@ func (r *RouteFetcher) subscribeToEvents(token *schema.Token) error {
 	r.logger.Info("Successfully-subscribed-to-routing-api-event-stream")
 
 	r.eventSource.Store(source)
+	var event routing_api.Event
 
 	for {
-		event, err := source.Next()
+		event, err = source.Next()
 		if err != nil {
 			metrics.IncrementCounter(SubscribeEventsErrors)
 			r.logger.Error("Failed to get next event: ", err)
 			break
 		}
-		r.logger.Debug("Handling event: ", lager.Data{"event": event})
+		r.logger.Debug("received-event", lager.Data{"event": event})
 		r.eventChannel <- event
 	}
 	return err
@@ -146,7 +147,16 @@ func (r *RouteFetcher) subscribeToEvents(token *schema.Token) error {
 func (r *RouteFetcher) HandleEvent(e routing_api.Event) {
 	eventRoute := e.Route
 	uri := route.Uri(eventRoute.Route)
-	endpoint := route.NewEndpoint(eventRoute.LogGuid, eventRoute.IP, uint16(eventRoute.Port), eventRoute.LogGuid, nil, eventRoute.TTL, eventRoute.RouteServiceUrl)
+	endpoint := route.NewEndpoint(
+		eventRoute.LogGuid,
+		eventRoute.IP,
+		uint16(eventRoute.Port),
+		eventRoute.LogGuid,
+		"",
+		nil,
+		eventRoute.GetTTL(),
+		eventRoute.RouteServiceUrl,
+		eventRoute.ModificationTag)
 	switch e.Action {
 	case "Delete":
 		r.RouteRegistry.Unregister(uri, endpoint)
@@ -157,10 +167,12 @@ func (r *RouteFetcher) HandleEvent(e routing_api.Event) {
 
 func (r *RouteFetcher) FetchRoutes() error {
 	r.logger.Debug("syncer-fetch-routes-started")
+
 	defer r.logger.Debug("syncer-fetch-routes-completed")
+
 	forceUpdate := false
 	var err error
-	var routes []db.Route
+	var routes []models.Route
 	for count := 0; count < 2; count++ {
 		r.logger.Debug("syncer-fetching-token")
 		token, tokenErr := r.UaaClient.FetchToken(forceUpdate)
@@ -190,7 +202,7 @@ func (r *RouteFetcher) FetchRoutes() error {
 	return err
 }
 
-func (r *RouteFetcher) refreshEndpoints(validRoutes []db.Route) {
+func (r *RouteFetcher) refreshEndpoints(validRoutes []models.Route) {
 	r.deleteEndpoints(validRoutes)
 
 	r.endpoints = validRoutes
@@ -203,15 +215,17 @@ func (r *RouteFetcher) refreshEndpoints(validRoutes []db.Route) {
 				aRoute.IP,
 				uint16(aRoute.Port),
 				aRoute.LogGuid,
+				"",
 				nil,
-				aRoute.TTL,
+				aRoute.GetTTL(),
 				aRoute.RouteServiceUrl,
+				aRoute.ModificationTag,
 			))
 	}
 }
 
-func (r *RouteFetcher) deleteEndpoints(validRoutes []db.Route) {
-	var diff []db.Route
+func (r *RouteFetcher) deleteEndpoints(validRoutes []models.Route) {
+	var diff []models.Route
 
 	for _, curRoute := range r.endpoints {
 		routeFound := false
@@ -225,7 +239,6 @@ func (r *RouteFetcher) deleteEndpoints(validRoutes []db.Route) {
 
 		if !routeFound {
 			diff = append(diff, curRoute)
-			r.endpoints = r.endpoints
 		}
 	}
 
@@ -237,14 +250,16 @@ func (r *RouteFetcher) deleteEndpoints(validRoutes []db.Route) {
 				aRoute.IP,
 				uint16(aRoute.Port),
 				aRoute.LogGuid,
+				"",
 				nil,
-				aRoute.TTL,
+				aRoute.GetTTL(),
 				aRoute.RouteServiceUrl,
+				aRoute.ModificationTag,
 			))
 	}
 }
 
-func routeEquals(current, desired db.Route) bool {
+func routeEquals(current, desired models.Route) bool {
 	if current.Route == desired.Route && current.IP == desired.IP && current.Port == desired.Port {
 		return true
 	}

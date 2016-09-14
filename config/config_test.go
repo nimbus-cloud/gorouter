@@ -3,7 +3,7 @@ package config_test
 import (
 	"crypto/tls"
 
-	. "github.com/cloudfoundry/gorouter/config"
+	. "code.cloudfoundry.org/gorouter/config"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -73,6 +73,20 @@ nats:
 			Expect(config.Nats[0].Pass).To(Equal("pass"))
 		})
 
+		Context("Suspend Pruning option", func() {
+			It("sets default suspend_pruning_if_nats_unavailable", func() {
+				Expect(config.SuspendPruningIfNatsUnavailable).To(BeFalse())
+			})
+
+			It("sets default suspend_pruning_if_nats_unavailable", func() {
+				var b = []byte(`
+suspend_pruning_if_nats_unavailable: true
+`)
+				config.Initialize(b)
+				Expect(config.SuspendPruningIfNatsUnavailable).To(BeTrue())
+			})
+		})
+
 		It("sets default logging configs", func() {
 			Expect(config.Logging.File).To(Equal(""))
 			Expect(config.Logging.Syslog).To(Equal(""))
@@ -89,7 +103,7 @@ nats:
 		It("sets access log config to file only", func() {
 			var b = []byte(`
 access_log:
-    file: "/var/vcap/sys/log/gorouter/access.log"
+  file: "/var/vcap/sys/log/gorouter/access.log"
 `)
 			config.Initialize(b)
 			Expect(config.AccessLog.File).To(Equal("/var/vcap/sys/log/gorouter/access.log"))
@@ -99,8 +113,8 @@ access_log:
 		It("sets access log config to file and no streaming", func() {
 			var b = []byte(`
 access_log:
-    file: "/var/vcap/sys/log/gorouter/access.log"
-		enable_streaming: false
+  file: "/var/vcap/sys/log/gorouter/access.log"
+  enable_streaming: false
 `)
 			config.Initialize(b)
 			Expect(config.AccessLog.File).To(Equal("/var/vcap/sys/log/gorouter/access.log"))
@@ -110,8 +124,8 @@ access_log:
 		It("sets access log config to file and streaming", func() {
 			var b = []byte(`
 access_log:
-    file: "/var/vcap/sys/log/gorouter/access.log"
-    enable_streaming: true
+  file: "/var/vcap/sys/log/gorouter/access.log"
+  enable_streaming: true
 `)
 			config.Initialize(b)
 			Expect(config.AccessLog.File).To(Equal("/var/vcap/sys/log/gorouter/access.log"))
@@ -149,8 +163,8 @@ preferred_network: 10.1.1.0/24
 			config.Process()
 
 			Ω(config.PreferredNetwork).NotTo(Equal(nil))
-		})		
-		
+		})
+
 		It("sets the rest of config", func() {
 			var b = []byte(`
 port: 8082
@@ -210,32 +224,34 @@ routing_api:
 oauth:
   token_endpoint: uaa.internal
   port: 8443
-  skip_oauth_tls_verification: true
+  skip_ssl_validation: true
   client_name: client-name
   client_secret: client-secret
+  ca_certs: ca-cert
 `)
 
 			config.Initialize(b)
 
 			Expect(config.OAuth.TokenEndpoint).To(Equal("uaa.internal"))
 			Expect(config.OAuth.Port).To(Equal(8443))
-			Expect(config.OAuth.SkipOAuthTLSVerification).To(Equal(true))
+			Expect(config.OAuth.SkipSSLValidation).To(Equal(true))
 			Expect(config.OAuth.ClientName).To(Equal("client-name"))
 			Expect(config.OAuth.ClientSecret).To(Equal("client-secret"))
+			Expect(config.OAuth.CACerts).To(Equal("ca-cert"))
 		})
 
 		It("sets the SkipSSLValidation config", func() {
 			var b = []byte(`
-ssl_skip_validation: true
+skip_ssl_validation: true
 `)
 			config.Initialize(b)
-			Expect(config.SSLSkipValidation).To(BeTrue())
+			Expect(config.SkipSSLValidation).To(BeTrue())
 		})
 
 		It("defaults the SkipSSLValidation config to false", func() {
 			var b = []byte(``)
 			config.Initialize(b)
-			Expect(config.SSLSkipValidation).To(BeFalse())
+			Expect(config.SkipSSLValidation).To(BeFalse())
 		})
 
 		It("sets the route service recommend https config", func() {
@@ -281,6 +297,16 @@ token_fetcher_expiration_buffer_time: 40
 			Expect(config.TokenFetcherRetryIntervalInSeconds).To(Equal(5))
 			Expect(config.TokenFetcherExpirationBufferTimeInSeconds).To(Equal(int64(30)))
 		})
+
+		It("sets proxy protocol", func() {
+			var b = []byte(`
+enable_proxy: true
+`)
+
+			config.Initialize(b)
+
+			Expect(config.EnablePROXY).To(Equal(true))
+		})
 	})
 
 	Describe("Process", func() {
@@ -304,7 +330,23 @@ token_fetcher_retry_interval: 10
 			Expect(config.PublishActiveAppsInterval).To(Equal(4 * time.Second))
 			Expect(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
 			Expect(config.TokenFetcherRetryInterval).To(Equal(10 * time.Second))
+			Expect(config.NatsClientPingInterval).To(Equal(15 * time.Second))
 			Expect(config.SecureCookies).To(BeTrue())
+		})
+
+		Context("When StartResponseDelayInterval is lesser than DropletStaleThreshold", func() {
+			It("set NatsClientPingInterval to (DropletStaleThreshold/2 - StartResponseDelayInterval)", func() {
+				var b = []byte(`
+droplet_stale_threshold: 120
+start_response_delay_interval: 20
+`)
+
+				config.Initialize(b)
+				config.Process()
+				Expect(config.NatsClientPingInterval).To(Equal(40 * time.Second))
+				Expect(config.DropletStaleThreshold).To(Equal(120 * time.Second))
+				Expect(config.StartResponseDelayInterval).To(Equal(20 * time.Second))
+			})
 		})
 
 		Context("When StartResponseDelayInterval is greater than DropletStaleThreshold", func() {
@@ -316,7 +358,7 @@ start_response_delay_interval: 15
 
 				config.Initialize(b)
 				config.Process()
-
+				Expect(config.NatsClientPingInterval).To(Equal(7 * time.Second))
 				Expect(config.DropletStaleThreshold).To(Equal(15 * time.Second))
 				Expect(config.StartResponseDelayInterval).To(Equal(15 * time.Second))
 			})
@@ -333,6 +375,7 @@ secure_cookies: false
 
 				Expect(config.SecureCookies).To(BeFalse())
 			})
+
 		})
 
 		Describe("NatsServers", func() {
@@ -348,7 +391,7 @@ nats:
     pass: pass2
 `)
 
-			It("returns a slice of of the configured NATS servers", func() {
+			It("returns a slice of the configured NATS servers", func() {
 				config.Initialize(b)
 
 				natsServers := config.NatsServers()
@@ -389,7 +432,7 @@ route_services_secret: my-route-service-secret
 					})
 				})
 
-				Context("when the route service secret and the decrypt only route service secret are are set", func() {
+				Context("when the route service secret and the decrypt only route service secret are set", func() {
 					BeforeEach(func() {
 						configYaml = []byte(`
 route_services_secret: my-route-service-secret
@@ -456,13 +499,13 @@ routing_api:
 			Context("When it is given valid values for a certificate", func() {
 				var b = []byte(`
 enable_ssl: true
-ssl_cert_path: ../test/assets/public.pem
-ssl_key_path: ../test/assets/private.pem
+ssl_cert_path: ../test/assets/certs/server.pem
+ssl_key_path: ../test/assets/certs/server.key
 cipher_suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 `)
 
-				It("returns a valid valid certificate", func() {
-					expectedCertificate, err := tls.LoadX509KeyPair("../test/assets/public.pem", "../test/assets/private.pem")
+				It("returns a valid certificate", func() {
+					expectedCertificate, err := tls.LoadX509KeyPair("../test/assets/certs/server.pem", "../test/assets/certs/server.key")
 					Expect(err).ToNot(HaveOccurred())
 
 					config.Initialize(b)
@@ -492,8 +535,8 @@ cipher_suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 			Context("When it is given valid cipher suites", func() {
 				var b = []byte(`
 enable_ssl: true
-ssl_cert_path: ../test/assets/public.pem
-ssl_key_path: ../test/assets/private.pem
+ssl_cert_path: ../test/assets/certs/server.pem
+ssl_key_path: ../test/assets/certs/server.key
 cipher_suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_RSA_WITH_AES_128_CBC_SHA:TLS_RSA_WITH_AES_256_CBC_SHA
 `)
 
@@ -519,8 +562,8 @@ cipher_suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_12
 			Context("When it is given invalid cipher suites", func() {
 				var b = []byte(`
 enable_ssl: true
-ssl_cert_path: ../test/assets/public.pem
-ssl_key_path: ../test/assets/private.pem
+ssl_cert_path: ../test/assets/certs/server.pem
+ssl_key_path: ../test/assets/certs/server.key
 cipher_suites: potato
 `)
 
@@ -534,8 +577,8 @@ cipher_suites: potato
 			Context("When it is given an unsupported cipher suite", func() {
 				var b = []byte(`
 enable_ssl: true
-ssl_cert_path: ../test/assets/public.pem
-ssl_key_path: ../test/assets/private.pem
+ssl_cert_path: ../test/assets/certs/server.pem
+ssl_key_path: ../test/assets/certs/server.key
 cipher_suites: TLS_RSA_WITH_RC4_128_SHA
 `)
 
@@ -551,8 +594,8 @@ cipher_suites: TLS_RSA_WITH_RC4_128_SHA
 		Context("When given no cipher suites", func() {
 			var b = []byte(`
 enable_ssl: true
-ssl_cert_path: ../test/assets/public.pem
-ssl_key_path: ../test/assets/private.pem
+ssl_cert_path: ../test/assets/certs/server.pem
+ssl_key_path: ../test/assets/certs/server.key
 `)
 
 			It("panics", func() {

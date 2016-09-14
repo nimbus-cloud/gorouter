@@ -1,16 +1,16 @@
 package varz_test
 
 import (
-	"github.com/cloudfoundry/gorouter/config"
-	"github.com/cloudfoundry/gorouter/metrics/fakes"
-	"github.com/cloudfoundry/gorouter/registry"
-	"github.com/cloudfoundry/gorouter/route"
-	. "github.com/cloudfoundry/gorouter/varz"
-	"github.com/cloudfoundry/yagnats/fakeyagnats"
+	"code.cloudfoundry.org/gorouter/config"
+	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
+	"code.cloudfoundry.org/gorouter/registry"
+	"code.cloudfoundry.org/gorouter/route"
+	. "code.cloudfoundry.org/gorouter/varz"
+	"code.cloudfoundry.org/lager"
+	"code.cloudfoundry.org/lager/lagertest"
+	"code.cloudfoundry.org/routing-api/models"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/pivotal-golang/lager"
-	"github.com/pivotal-golang/lager/lagertest"
 
 	"encoding/json"
 	"fmt"
@@ -25,7 +25,7 @@ var _ = Describe("Varz", func() {
 
 	BeforeEach(func() {
 		logger = lagertest.NewTestLogger("test")
-		Registry = registry.NewRouteRegistry(logger, config.DefaultConfig(), fakeyagnats.Connect(), new(fakes.FakeRouteRegistryReporter))
+		Registry = registry.NewRouteRegistry(logger, config.DefaultConfig(), new(fakes.FakeRouteRegistryReporter))
 		Varz = NewVarz(Registry)
 	})
 
@@ -77,7 +77,7 @@ var _ = Describe("Varz", func() {
 	It("has urls", func() {
 		Expect(findValue(Varz, "urls")).To(Equal(float64(0)))
 
-		var fooReg = route.NewEndpoint("12345", "192.168.1.1", 1234, "", map[string]string{}, -1, "")
+		var fooReg = route.NewEndpoint("12345", "192.168.1.1", 1234, "", "", map[string]string{}, -1, "", models.ModificationTag{})
 
 		// Add a route
 		Registry.Register("foo.vcap.me", fooReg)
